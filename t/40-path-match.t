@@ -2,29 +2,12 @@
 use strict;
 use warnings;
 use Test::More;
+use FindBin;
+use lib "$FindBin::Bin/lib";
+use ConServeTestUtil ':all';
 
 use_ok 'Web::ConServe'
 	or BAIL_OUT;
-
-sub make_env {
-	return {
-		REQUEST_METHOD => 'GET',
-		PATH_INFO => '/',
-		QUERY_STRING => '',
-		SERVER_NAME => 'localhost',
-		SERVER_PORT => 0,
-		'psgi.version' => [1,1],
-		'psgi.url_scheme' => 'https',
-		'psgi.input' => undef,
-		'psgi.errors' => \*STDERR,
-		'psgi.multithread' => 0,
-		'psgi.multiprocess' => 0,
-		'psgi.run_once' => 0,
-		'psgi.nonblocking' => 0,
-		'psgi.streaming' => 0,
-		@_
-	}
-}
 
 sub simple_path {
 	my $c= Web::ConServe->new();
@@ -42,7 +25,7 @@ sub simple_path {
 	for (@tests) {
 		my ($path, $rule_idx)= @$_;
 		my $env= make_env(PATH_INFO => $path);
-		is_deeply( $dispatcher->($c->clone(plack_environment => $env))->{rule}, $rules[$rule_idx], "path $path" );
+		is_deeply( $dispatcher->($c->accept_request($env))->{rule}, $rules[$rule_idx], "path $path" );
 	}
 }
 subtest simple_path => \&simple_path;
@@ -67,7 +50,7 @@ sub path_with_capture {
 	for (@tests) {
 		my ($path, $rule_idx)= @$_;
 		my $env= make_env(PATH_INFO => $path);
-		is_deeply( $dispatcher->($c->clone(plack_environment => $env))->{rule}, $rules[$rule_idx], "path $path" );
+		is_deeply( $dispatcher->($c->accept_request($env))->{rule}, $rules[$rule_idx], "path $path" );
 	}
 }
 subtest path_with_capture => \&path_with_capture;

@@ -3,24 +3,30 @@ package Web::ConServe;
 use Moo;
 use Carp;
 use mro;
+use Carp 'croak';
+use Web::ConServe::Plugin::Res;
+use Module::Runtime;
+use namespace::clean;
 
 # ABSTRACT: Conrad's conservative web service framework
 
 =head1 SYNOPSIS
 
   package MyWebapp;
-  use Web::ConServe -parent,
-    -plugins => qw/ Foo Bar Baz /;
-  with 'My::Moo::Role';
+  use Web::ConServe -parent,      # Automatically set up Moo and base class
+    -plugins => qw/ Res /;        # Supports a plugin system
+  with 'My::Moo::Role';           # Fully Moo compatible
   
-  # Method annotations like Catalyst, but the syntax of Web::Simple,
+  # Actions declared with method attributes like Catalyst,
+  # but using the path syntax like Web::Simple
   # but the application object is a lot more like CGI::Application.
-  # Request and response come from Plack.
+  # Request and Response are Plack-style.
   
   sub index : Serve( / ) {
     my $self= shift;
-    return [422] unless my $x= $self->req->parameters->get('x');
-    return [200, undef, ["Hello World"]];
+    my $x= $self->param('x')
+      or return res_unprocessable('param x is required');
+    return res_html("Hello World");
   }
   
   # You get Moo attributes, and can lazy-build.
@@ -40,23 +46,27 @@ use mro;
   
   # and it's fully customizable
   
-  sub conserv_analyze_request {
+  sub BUILD {
     my $self= shift;
-	$self->next::method();
-	$self->req->analysis->{wants_json}= $self->req->header('Accept') =~ /application\/json/;
-    $self->req->analysis->{we_like_them}= $self->req->address =~ /^10\./;
+    if ($self->req) {
+        my $flags= $self->req->flags;
+        $flags->{wants_json}= $self->req->header('Accept') =~ /application\/json/;
+        $flags->{we_like_them}= $self->req->address =~ /^10\./;
+        # you can subclass the request object for prettier code.
+    }
   }
 
 =head1 DESCRIPTION
 
-The purpose of ConServe is to provide a minimalist (but still fully usable)
+The purpose of ConServe is to provide a minimalist (but still convenient)
 base class for writing Plack apps.  To read about why and how, see the
 L</DESIGN GOALS> section.  If you want to know how to accomplish common tasks,
 see the L<Cookbook|Web::ConServe::Cookbook> page.
 
 =head1 APPLICATION LIFECYCLE
 
-In order to make the most of Web::ConServe, you should know a bit about how it works.
+In order to make the most of Web::ConServe, you should have a feel for how it
+works internally.
 
 =over
 
@@ -78,13 +88,10 @@ normally would with L<Moo>.
 
 =item Request Binding
 
-When a new request comes in, the plack app calls L</clone> and passes in the
-plack environment.  By default, L</clone> creates a shallow copy of the object,
-so it's fast.  You can override that if you want.
-
-After this step, C<< $self->plack_environment >> is defined.  Before this step
-it is not, and the default builder methods for things like C<< $self->req >>
-will throw exceptions.
+When a new request comes in, the plack app L</clone>s the application and then
+calls L</accept_request> with the plack environment.  That method should
+initialize the L</request> attribute as appropriate.  The default simply
+creates an instance of L<Web::ConServe::Request> and assigns it.
 
 =item Request Dispatch
 
@@ -133,28 +140,33 @@ It would not be hard to write a plugin which chooses the best method.
 is equivalent to
 
   use Moo;
+  use Web::ConServe;
   BEGIN { extends 'Web::ConServe'; }
   use Web::ConServe::Plugin::Foo '-plug';
   use Web::ConServe::Plugin::Bar '-plug';
-
-Either way will give you the "Serve()" method annotation.
 
 =cut
 
 sub import {
 	my ($class, @args)= @_;
 	my $caller= caller;
-	my $add_moo;
-	my @with;
+	my ($add_moo, @plug, @extend, @with);
 	while (@args) {
-		if ($args[0] eq '-parent') { shift @args; $add_moo= 1 }
+		if ($args[0] eq '-parent') {
+			shift @args;
+			$add_moo= 1;
+		}
 		elsif ($args[0] eq '-plugins') {
 			shift @args;
-			while (@args && $args[0] !~ /^-/) { push @with, 'Web::ConServe::Plugin::'.(shift @args); }
+			while (@args && $args[0] !~ /^-/) { push @plug, shift @args; }
 		}
 		elsif ($args[0] eq '-with') {
 			shift @args;
 			while (@args && $args[0] !~ /^-/) { push @with, shift @args; }
+		}
+		elsif ($args[0] eq '-extends') {
+			shift @args;
+			while (@args && $args[0] !~ /^-/) { push @extend, shift @args; }
 		}
 		else {
 			croak "Un-handled export requested from Web::ConServe: $args[0]";
@@ -162,6 +174,17 @@ sub import {
 	}
 	eval 'package '.$caller.'; use Moo; extends "Web::ConServ";' or croak $@
 		if $add_moo;
+	if (@plug) {
+		for (@plug) {
+			$_= "Web::ConServe::Plugin::$_";
+			is_module_name($_) or croak "Invalid plugin name '$_'";
+		}
+		eval join(';', 'package '.$caller, map "use $_ '-plug';", @plug) or croak $@;
+	}
+	eval 'package '.$caller.'; extends @extend;' or croak $@
+		if @extend;
+	eval 'package '.$caller.'; with @with;' or croak $@
+		if @with;
 }
 
 # Default allows subclasses to wrap it with modifiers
@@ -170,39 +193,47 @@ sub DESTROY {}
 
 =head1 MAIN API ATTRIBUTES
 
-=head2 plack_environmnt
+=head2 request_class
 
-Reference to L</Plack>'s C<$env>.  This is C<undef> on the main application
-instance.  For per-request instances, it is set by the L</clone> method.
-This is a weak reference, and becomes undef when the plack environment is
-destroyed, B<before> the per-request application gets destroyed.
-
-=head2 env
-
-Alias for L</plack_environment>
+The request class that will be used by default.  Setting this might be better
+than overriding L</accept_request> if you prefer to use lazy attributes on the
+request object instead of doing all the processing up-front.
 
 =head2 request
 
-The request object.  Lazy-built instance of L<Web::ConServe::Request>.
-Override C<_build_request> to subclass this.
+  $self->req->params->get('x');  # alias 'req' is faster
+
+The request object.  The C<request> (and C<req>) accessor is read-only,
+because the request should never change from what was delivered to the
+constructor.  It is undefined on the initial application instance, but
+set on the per-request instance returned by L</accept_request>.
+
+Override L</accept_request> to control how it is created or add
+custom analysis of the incoming request.
 
 =head2 req
 
-Alias for L</request>.
+Alias for C<< $self->request >>.
+
+=head2 param
+
+  my $x= $self->param('x');
+
+Shortcut for C<< $self->req->parameters->get(...) >>, which ignores list
+context and always returns a single value even for multi-valued parameters.
+
+=head2 params
+
+  my @x= $self->params->get_all('x');
+
+Shortcut for C<< $self->req->parameters >>, which is an instance of
+L<Hash::MultiValue>.
 
 =cut
 
-has plack_environment => ( is => 'rw', weak_ref => 1 );
-sub env { goto $_[0]->can('plack_environment') }
-
 has request_class     => ( is => 'rw', default => sub { require Plack::Request; 'Plack::Request' } );
-has request           => ( is => 'rw', lazy => 1, clearer => 1, predicate => 1 );
-sub req { goto $_[0]->can('request') }
-
-sub _build_request {
-	my $self= shift;
-	$self->request_class->new($self->plack_environment);
-}
+has request           => ( is => 'ro', reader => 'req' );
+sub request { shift->req }
 
 =head1 MAIN API METHODS
 
@@ -213,14 +244,28 @@ Standard Moo constructor.
 =head2 clone
 
 Like 'new', but inherit all existing attributes of the current instance.
+Override this if you need to avoid sharing certain resources between instances.
+
+=head2 accept_request
+
+  my $new_instance= $app->accept_request( $plack_env );
+
+Clone the application and initialize the L</request> attribute.  The default
+implementation creates a request from L</request_class> and then calls L</clone>
+and L</set_request>.
 
 =head2 dispatch
+
+  my $something= $app->dispatch; # using app->req
+  my $something= $app->dispatch( $request_object );
 
 Dispatch a request to an action method, and return the application-specific
 result.  You might choose to wrap this with exception handling, to catch
 errors from the controller actions.
 
 =head2 view
+
+  my $plack_result= $app->view( $something );
 
 Convert an application-specific result into a Plack response arrayref.
 By default, this checks for objects which are not arrayrefs and have method
@@ -235,10 +280,12 @@ of "if" checks after the fact.
 
 =head2 call
 
-Calls L</clone> to create a new instance with the given plack environment,
-then L</dispatch> to create an intermediate response, and then L</view>
-to render that response as a Plack response arrayref.  You might choose to
-wrap this with exception handling to trap errors from views.
+  my $plack_result= $app->call( $plack_env );
+
+Calls L</accept_request> to create a new instance with the given plack
+environment, then L</dispatch> to create an intermediate response, and then
+L</view> to render that response as a Plack response arrayref.  You might
+choose to wrap this with exception handling to trap errors from views.
 
 =head2 to_app
 
@@ -248,24 +295,30 @@ Returns a Plack coderef that calls L</call>.
 
 sub clone {
 	my $self= shift;
-	my $clone= bless { %$self }, ref $self;
-	if (@_) {
-		my $new_attrs= @_ == 1 && ref $_[0] eq 'HASH'? $_[0]
-			: (@_ & 1) == 0? { @_ }
-			: croak "Expected hashref or even number of key/value";
-		for my $k (keys %$new_attrs) {
-			$clone->$k($new_attrs->{$k});
-		}
-	}
-	$clone;
+	ref($self)->new(
+		%$self,
+		(@_ == 1 && ref $_[0] eq 'HASH'? %{$_[0]}
+		: (@_ & 1) == 0? @_
+		: croak "Expected hashref or even number of key/value"
+		)
+	);
+}
+
+sub accept_request {
+	my ($self, $plack_env)= @_;
+	my $req= $self->request_class->new($plack_env);
+	$self->clone(request => $req);
 }
 
 sub dispatch {
 	my $self= shift;
-	my ($code, @args)= $self->conserve_dispatcher($self->request);
-	return $code->($self, @args)
-		if ref $code eq 'CODE';
-	return [ $code ];
+	my $result= $self->conserve_dispatcher->($self->request);
+	$self->req->action($result);
+	my $m= $result->{rule} && $result->{rule}{method};
+	return $self->$m(@{$result->{captures} // []}) if $m;
+	return Web::ConServe::Plugin::Res::res_not_found() unless $result->{path_match};
+	return Web::ConServe::Plugin::Res::res_bad_method() if $result->{method_mismatch};
+	return Web::ConServe::Plugin::Res::res_unprocessable();
 }
 
 sub view {
@@ -293,7 +346,7 @@ sub view {
 
 sub call {
 	my ($self, $env)= @_;
-	my $inst= $self->clone(plack_environment => $env);
+	my $inst= $self->accept_request($env);
 	$inst->view($inst->dispatch());
 }
 
@@ -471,7 +524,7 @@ sub conserve_compile_dispatch_rules {
 		local $self->{plack_environment}= $env if $env;
 		local $self->{request}= undef if $env;
 		my $result={ captures => [] };
-		_conserve_search_rules($self, \%tree, $self->env->{PATH_INFO}, $result);
+		_conserve_search_rules($self, \%tree, $self->req->env->{PATH_INFO}, $result);
 		return $result;
 	};
 }
@@ -517,10 +570,10 @@ sub _conserve_search_rules {
 	my ($self, $node, $path, $result)= @_;
 	my $next;
 	# Step 1, quickly dispatch any static path, or exact-matching wildcard prefix
-	print STDERR "test $path vs ".join(', ', keys %{$node->{path}})."\n";
+	#print STDERR "test $path vs ".join(', ', keys %{$node->{path}})."\n";
 	if ($node->{path} and ($next= $node->{path}{$path})) {
 		# record that there was at least one full match
-		$result->{path_match} //= $self->env->{PATH_INFO};
+		$result->{path_match} //= $self->req->env->{PATH_INFO};
 		# Check absolutes first
 		if ($next->{rules}) {
 			$self->_conserve_test_rule($_, $result) and return $_
@@ -533,11 +586,11 @@ sub _conserve_search_rules {
 		}
 	}
 	# Step 2, check for a path that we can capture a portion of, and recursively continue
-	print STDERR "test $path vs $node->{sub_path_re}\n" if $node->{sub_path_re};
+	#print STDERR "test $path vs $node->{sub_path_re}\n" if $node->{sub_path_re};
 	if ($node->{sub_path_re}) {
 		my ($prefix)= ($path =~ $node->{sub_path_re});
 		while (defined $prefix) {
-			print STDERR "try removing $prefix\n";
+			#print STDERR "try removing $prefix\n";
 			$next= $node->{path}{$prefix} or die "invalid path tree";
 			my ($wild, $suffix)= (substr($path, length $prefix) =~ m,([^/]*)(.*),);
 			push @{$result->{captures}}, $wild;
@@ -547,15 +600,15 @@ sub _conserve_search_rules {
 		}
 	}
 	# Step 3, check for a wildcard that can match the full remainder of the path
-	print STDERR "test $path vs $node->{sub_wild_cap_re}\n" if $node->{sub_wild_cap_re};
+	#print STDERR "test $path vs $node->{sub_wild_cap_re}\n" if $node->{sub_wild_cap_re};
 	if ($node->{sub_wild_cap_re}) {
 		my ($prefix)= ($path =~ $node->{sub_wild_cap_re});
 		while (defined $prefix) {
-			print STDERR "try removing $prefix\n";
+			#print STDERR "try removing $prefix\n";
 			$next= $node->{path}{$prefix} or die "invalid path tree";
 			my $remainder= substr($path, length($prefix));
 			for my $wild_item (@{ $next->{wild_cap} }) {
-				print STDERR "try $remainder vs $wild_item->[0]\n";
+				#print STDERR "try $remainder vs $wild_item->[0]\n";
 				if (my (@more_caps)= ($remainder =~ $wild_item->[0])) {
 					# Record that we found a match up to the wildcard
 					my $match= substr($self->env->{PATH_INFO}, 0, -length($remainder));
