@@ -476,6 +476,7 @@ behind L</search_actions>.
 
 =cut
 
+sub conserve_FLAG_TRUE { \1 }
 sub conserve_parse_action {
 	my ($self, $text, $err_ref)= @_;
 	my %rule;
@@ -485,16 +486,16 @@ sub conserve_parse_action {
 				$$err_ref= 'Multiple paths defined' if $err_ref;
 				return;
 			}
-			$rule{path}= $part;
 			if (index($part, ':') >= 0) {
 				$rule{capture_names}= [ $part =~ /:(\w+)/g ];
-				$rule{path} =~ s/:(\w+)/\*/g;
+				$part =~ s/:(\w+)/\*$1/g;
 			}
+			$rule{path}= $part;
 		} elsif ($part =~ /^[A-Z]/) {
 			$rule{methods}{$_}++ for split ',', $part;
 		} elsif ($part =~ /^\w/) {
 			my ($name, $value)= split /=/, $part, 2;
-			$rule{constraints}{$name}= defined $value? $value : \1;
+			$rule{flags}{$name}= defined $value? $value : conserve_FLAG_TRUE;
 		}
 		else {
 			$$err_ref= "Can't parse rule, at '$part'" if $err_ref;
@@ -505,12 +506,27 @@ sub conserve_parse_action {
 }
 
 sub conserve_compile_actions {
-	my ($self, $rules)= @_;
-	$rules ||= $self->conserve_actions;
-	# Tree up the rules according to prefix
+	my ($self, $actions)= @_;
+	$actions ||= $self->conserve_actions;
+	my $tree= $self->_conserve_build_action_tree($actions);
+	return sub {
+		my ($self, $req)= @_;
+		$req //= $self->req;
+		my $result= { captures => [] };
+		$self->_conserve_search_actions($req, $tree, $req->env->{PATH_INFO}, $result);
+		my @ret;
+		push @ret, $result->{action} if defined $result->{action};
+		push @ret, @{ $result->{action_rejects} } if defined $result->{action_rejects};
+		return @ret;
+	};
+}
+sub _conserve_build_action_tree {
+	my ($self, $actions)= @_;
+	# Tree up the actions according to prefix
 	my %tree= ( path => {} );
-	for my $rule (@$rules) {
-		my $remainder= $rule->{path};
+	for my $action (@$actions) {
+		$action->{match_fn}= $self->_conserve_create_action_match_fn($action);
+		my $remainder= $action->{path};
 		my $node= $tree{path};
 		my @capture_names;
 		while (1) {
@@ -518,7 +534,7 @@ sub conserve_compile_actions {
 			my ($prefix, $wild, $suffix)= $remainder =~ m,^([^*]*)(\**)(.*),
 				or die "Bug: '$remainder'";
 			if (!length $wild) { # path ends at this node
-				push @{ $node->{$prefix}{rules} }, $rule
+				push @{ $node->{$prefix}{actions} }, $action
 					if $node;
 				last;
 			}
@@ -533,9 +549,9 @@ sub conserve_compile_actions {
 				# list of regexes to try.  First match wins.
 				if (length $suffix) {
 					$suffix =~ s,(\*+), $1 eq '*' ? '([^/]+)' : '(.*?)' ,ge;
-					push @{ $node->{$prefix}{wild_cap} }, [ qr/$suffix/, $rule ];
+					push @{ $node->{$prefix}{wild_cap} }, [ qr/$suffix/, $action ];
 				} else {
-					push @{ $node->{$prefix}{wild} }, $rule;
+					push @{ $node->{$prefix}{wild} }, $action;
 				}
 				last;
 			}
@@ -544,16 +560,7 @@ sub conserve_compile_actions {
 	}
 	# For each ->{...}{cap} node, make a {cap_regex} to find the longest prefix
 	&_conserve_make_subpath_cap_regexes for \%tree;
-	sub {
-		my ($self, $req)= @_;
-		$req //= $self->req;
-		my $result= { captures => [] };
-		$self->_conserve_search_actions($req, \%tree, $req->env->{PATH_INFO}, $result);
-		my @ret;
-		push @ret, $result->{action} if defined $result->{action};
-		push @ret, @{ $result->{action_rejects} } if defined $result->{action_rejects};
-		return @ret;
-	};
+	\%tree;
 }
 
 sub _conserve_make_subpath_cap_regexes {
@@ -602,9 +609,9 @@ sub _conserve_search_actions {
 		# record that there was at least one full match
 		$result->{path_match}= $req->path_info;
 		# Check absolutes first
-		if ($next->{rules}) {
+		if ($next->{actions}) {
 			$self->_conserve_search_actions_check($_, $req, $result) && return 1
-				for @{ $next->{rules} };
+				for @{ $next->{actions} };
 		}
 		# Then check any wildcard whose entire prefix matched
 		if ($next->{wild}) {
@@ -653,27 +660,46 @@ sub _conserve_search_actions {
 	return undef;
 }
 
+sub _conserve_create_action_match_fn {
+	my ($self, $action)= @_;
+	# TODO: maybe eval this into a more optimized form
+	my $methods= $action->{methods};
+	my $flags= $action->{flags};
+	sub {
+		return mismatch => 'method'
+			unless !$methods || $methods->{$_[1]->env->{REQUEST_METHOD}};
+		if ($flags) {
+			for (keys %{$flags}) {
+				my $v= $_[1]->flags->{$_};
+				return mismatch => 'flag'
+					unless defined $v && $flags->{$_} eq $v
+						or $flags->{$_} == conserve_FLAG_TRUE && $v;
+			}
+		}
+		return
+	};
+}
+
 # Path matches, so then check other conditions needed for match.
 # Also combine all the relevant data into the hashref for the action.
 sub _conserve_search_actions_check {
 	my ($self, $action, $req, $result)= @_;
-	my $info= defined $action->{match_fn}? $action->{match_fn}->($req) : {};
-	%$info= (
+	my %info= (
 		%$action,
 		path_match => $result->{path_match},
 		captures   => [ @{ $result->{captures} } ],
-		%$info
+		(defined $action->{match_fn}? $action->{match_fn}->($self, $req) : ())
 	);
-	if ($info->{capture_names}) {
+	if ($info{capture_names}) {
 		my %cap;
-		@cap{ @{$info->{capture_names}} }= @{ $info->{captures} };
-		$info->{captures_by_name}= \%cap;
+		@cap{ @{$info{capture_names}} }= @{ $info{captures} };
+		$info{captures_by_name}= \%cap;
 	}
-	if ($info->{mismatch}) {
-		push @{ $result->{action_rejects} }, $info;
+	if ($info{mismatch}) {
+		push @{ $result->{action_rejects} }, \%info;
 		return 0;
 	} else {
-		$result->{action}= $info;
+		$result->{action}= \%info;
 		return 1;
 	}
 }
