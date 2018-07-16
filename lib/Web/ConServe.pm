@@ -1,11 +1,13 @@
 package Web::ConServe;
 
-use Moo;
+use v5.14;
+use Moo 2;
 use Carp;
 use mro;
 use Web::ConServe::Request;
-use Web::ConServe::Plugin::Res;
+use Const::Fast 'const';
 use Module::Runtime;
+use HTTP::Status 'status_message';
 use namespace::clean;
 
 # ABSTRACT: Conrad's conservative web service framework
@@ -78,35 +80,36 @@ it operates.
 During Perl's compile phase, the L</Serve> annotations on your methods are
 parsed and added to a list of actions.  When the first instance of your class
 is created, the actions get "compiled" into a search function.  Parent classes
-and plugins can also add rules.  You can override many pieces of this process.
-See L</conserve_actions> and L</conserve_search_action_fn>.
+and plugins can also add actions.  You can override many pieces of this process.
+See L</actions> and L</search_actions>.
 
-=item App Creation
+=item Main Object Creation
 
-When the application is created as a Plack app, it creates an instance of your
-object via the normal constructor.  Customize the initialization however you
-normally would with L<Moo>.
+The class you declared gets created at startup via the normal Moo C<new>
+constructor.  Customize the initialization however you normally would with
+L<Moo>.
 
-=item Plack Creation
+=item Plack App Creation
 
-if you want to add Plack middleware as a built-in part of your app, you can
-override L</to_app>.
+The main object gets wrapped as a Plack app (coderef) via L</to_app>.
+If you want to add Plack middleware as a built-in part of your app, you can
+do so by overriding this method.
 
 =item Request Binding
 
 When a new request comes in, the plack app calls L</accept_request> which
-clones the app and sets the L</request> attribute.  You can override that
-method, or simply set a custom L</request_class>.
+clones the main object and sets the L</request> attribute.  You can override
+that method, or simply set a custom L</request_class>.
 
 =item Request Dispatch
 
 Next the plack app calls L</dispatch>.  This looks for the best matching
 rule for the request, then if found, calls that method.  The return value
-from the method becomes the response, after pos-processing.
+from the method becomes the response, after pos-processing (described next).
 
 If there was not a matching rule, then the dispatcher sets the response code
-as appropriate (404 for no path match, 405 for no method match, and 422 for
-a match that didn't meet custom user conditions)
+as appropriate: 404 for no path match, 405 for no method match, and 422 for
+a match that didn't meet custom user conditions.
 
 If the method throws an exception, the default is to let it bubble up the
 Plack chain so that you can use Plack middleware to deal with it.  If you want
@@ -121,9 +124,6 @@ wanted something like Catalyst's View system, or HTTP content negotiation, you
 could add that here.  You can also deal with any custom details or conventions
 you came up with for the return values of your actions.
 
-To facilitate plugins, you should always allow for native Plack responses
-as input.
-
 =item Cleanup
 
 You should consider the end of L</view> to be the last point when you can take
@@ -137,7 +137,7 @@ It would not be hard to write a plugin which chooses the best method.
 
 =head1 IMPORTS
 
-  use Web::ConServe qw/ -parent -plugins Foo Bar /;
+  use Web::ConServe qw/ -parent -plugins Foo Bar -with XYZ /;
 
 is equivalent to
 
@@ -145,9 +145,39 @@ is equivalent to
   BEGIN { extends 'Web::ConServe'; }
   use Web::ConServe::Plugin::Foo '-plug';
   use Web::ConServe::Plugin::Bar '-plug';
+  BEGIN { with "XYZ"; }
 
 Note that this allows plugins to change the class/role hierarchy as well as
 inject symbols into the current package namespace, such as 'sugar' methods.
+The roles or parent classes you add here happen at BEGIN-time, saving you
+some typing and cleaning up your code.  Plugins are assumed to belong to the
+Web::ConServe::Plugin namespace, but roles are not.
+
+=over
+
+=item -parent
+
+Declares that Moo should be invoked, and Web::ConServe should be installed
+as the parent class.
+
+=item -plugins
+
+Declares that all following arguments (until the next option flag) are Plugin
+package suffixes to the namespace L<Web::ConServe::Plugin>.  Each will be
+invoked in a C<BEGIN> block with the option C<-plug> which may have wide-
+ranging effects, as documented in the plugin.
+
+=item -extends
+
+Declares that all following arguments (until next option) are class names to
+be added using C<< extends "$PKG" >>.
+
+=item -with
+
+Declares that all following arguments (until next option) are role names to be
+added using C<< with "$ROLE" >>.
+
+=back
 
 =cut
 
@@ -197,6 +227,53 @@ sub DESTROY {}
 
 =head1 MAIN API ATTRIBUTES
 
+=head2 actions
+
+Arrayref of all available actions for this object.  Defaults to all the
+C<Serve()> attributes in the current class, plus any inherited from parent
+classes or plugins.
+
+For example,
+
+  sub foo : Serve( / ) {}
+  sub bar : Serve( /bar GET,HEAD,OPTIONS ) {}
+
+becomes
+
+  [
+    { handler => \&foo, path => '/' },
+    { handler => \&bar, path => '/bar', methods => {GET=>1, HEAD=>1, OPTIONS=>1} },
+  ]
+
+It is best not to modify this array, especially not on a per-request instance,
+but if you do, don't forget to clear/rebuild the attribute L</actions_cache>.
+The action hashrefs are read-only (see L<Const::Fast>).
+
+See L</conserve_register_action> to make class-level changes.
+
+See L</ACTIONS> for the specification of an action.
+
+=head2 actions_cache
+
+This is some unspecified data under the control of L</find_actions> which
+might store the result of some compilation process on the list of actions.
+If you change the list of actions in any way, you should call
+L</clear_actions_cache>.
+
+=cut
+
+has actions           => ( is => 'lazy', clearer => 1, predicate => 1 );
+sub _build_actions {
+	my $self= shift;
+	$self->conserve_actions_for_class(ref $self or $self, inherited => 1);
+}
+
+has actions_cache    => ( is => 'lazy', clearer => 1, predicate => 1 );
+sub _build_actions_cache {
+	my $self= shift;
+	$self->_conserve_build_action_tree($self->actions);
+}
+
 =head2 app_instance
 
 There are application instances created for use with Plack, and then request
@@ -242,6 +319,7 @@ L<Hash::MultiValue>.
 
 =cut
 
+has app_instance      => ( is => 'ro' );
 has request_class     => ( is => 'rw', default => sub { 'Web::ConServe::Request' } );
 has request           => ( is => 'ro', reader => 'req' );
 sub request { shift->req }
@@ -257,10 +335,10 @@ Standard Moo constructor.
 =head2 clone
 
 Like C<new>, but inherit all existing attributes of the current instance.
-Override this if you need to avoid sharing certain resources between instances.
-You might also want to deep-clone attributes to make sure they don't get
-altered during a request. The default is to call C<new> with a shallow copy of
-C<$self>'s attributes.
+This creates a B<shallow clone>.  Override this if you need to avoid sharing
+certain resources between instances.  You might also want to deep-clone
+critical attributes to make sure they don't get altered during a request,
+or better (on newer Perls) mark them readonly with L<Const::Fast>.
 
 =head2 accept_request
 
@@ -270,24 +348,23 @@ Clone the application and initialize the L</request> attribute from the Plack
 environment.  The default implementation creates a request from
 L</request_class> and then calls L</clone>.
 
-=head2 search_actions
+=head2 find_actions
 
-  my (@actions_data)= $app->search_actions( $request );
+  my (@actions_data)= $app->find_actions( $request );
 
 Return a list of hashrefs, one for each action which had a full path-match
 against the request.  The search stops at the first complete match, so the
 search was successful if and only if C<< !defined $actions_data[0]{mismatch} >>.
-Other actios whose patch matched but failed the custom failters (like method,
+Other actions whose path matched but failed the C<match_fn> (like HTTP Method,
 flags, etc) will follow in the list, for debugging purposes and to be able to
-return the correct HTTP error code.
+return the correct HTTP status code.
 
-Each hashref is a shallow copy of the action, and may have additional fields
+Each hashref is a shallow clone of the action, and may have additional fields
 describing the result of the match operation.
 
 =head2 dispatch
 
   my $something= $app->dispatch; # using app->req
-  my $something= $app->dispatch( $request_object );
 
 Dispatch a request to an action method, and return the application-specific
 result.  If no action matches, it returns an appropriate plack response of an
@@ -295,6 +372,13 @@ HTTP error code.
 
 You might choose to wrap this with exception handling, to catch errors from
 the controller actions.
+
+=head2 dispatch_fail_response
+
+This analyzes C<< ->req->action_rejects >> to come up with an appropriate HTTP
+status code, returned as a plack response arrayref.  It is called internally by
+L</dispatch> if there wasn't a matching action.  It is a separate method to
+enable easy subclassing or re-use.
 
 =head2 view
 
@@ -313,16 +397,20 @@ of "if" checks after the fact.
 
 =head2 call
 
+Main do-it-all method to handle a Plack request.
+
   my $plack_result= $app->call( $plack_env );
 
 Calls L</accept_request> to create a new instance with the given plack
 environment, then L</dispatch> to create an intermediate response, and then
-L</view> to render that response as a Plack response arrayref.  You might
+L</view> to render that response as a proper Plack response.  You might
 choose to wrap this with exception handling to trap errors from views.
 
 =head2 to_app
 
-Returns a Plack coderef that calls L</call>.
+Returns a Plack coderef that calls L</call>.   You might choose to override
+this to combine plack middleware with your app, so that the callers don't
+need to deal with those details.
 
 =cut
 
@@ -339,35 +427,43 @@ sub clone {
 
 sub accept_request {
 	my ($self, $plack_env)= @_;
+	$self->actions_cache; # Make sure lazy-initialized before clone
 	my $req= $self->request_class->new($plack_env);
-	$self->clone(request => $req);
+	$self->clone(app_instance => $self, request => $req);
 }
 
-sub search_actions {
-	my ($self, $req)= @_;
-	return $self->conserve_search_action_fn->($self, $req // $self->req);
-}
+sub _conserve_find_actions;
+*find_actions= *_conserve_find_actions;
 
 sub dispatch {
 	my $self= shift;
-	my @matches= $self->search_actions($self->req);
+	my @matches= $self->find_actions($self->req);
 	my $action= shift @matches
 		if @matches && !defined $matches[0]{mismatch};
 	
 	$self->req->action($action);
 	$self->req->action_rejects(\@matches);
 	
-	return $action->{handler}->($self, @{$action->{captures}})
-		if $action;
-	
-	# If nothing matched, then return 404
-	return [404, []]
-		unless @matches;
-	# If all matches returned 'mismatch=method', then return 405
-	return [405, []]
-		unless grep $_->{mismatch} ne 'method', @matches;
-	# Else some specific user requirement was not met, so return 422
-	return [422, []]
+	return $action
+		? $action->{handler}->($self, @{$action->{captures}})
+		: $self->dispatch_fail_response;
+}
+
+sub dispatch_fail_response {
+	my $self= shift;
+	my @rejects= @{ $self->req->action_rejects };
+	return [404, [], []]
+		unless @rejects;
+	# If all matches returned 'mismatch=method', then return 405 Method Not Allowed
+	my @not_method_problem= grep $_->{mismatch} ne 'method', @rejects;
+	return [$rejects[0]{http_status}//405, [], []]
+		unless @not_method_problem;
+	# If any match returned 'mismatch=permission', return 403 Forbidden
+	my ($forbidden)= grep $_->{mismatch} eq 'permission', @not_method_problem;
+	return [$forbidden->{http_status}//403, [], []]
+		if defined $forbidden;
+	# Else just return first mismatch with default code of 422 Unprocessable
+	return [$not_method_problem[0]{http_status}//422, [], []];
 }
 
 sub view {
@@ -380,6 +476,11 @@ sub view {
 		my $env= $self->req->action_inner_env;
 		$sub_app->($env);
 	}
+	elsif (@$result == 3 && $result->[0] >= 400 && @{$result->[2]} == 0) {
+		# If response is a plain HTTP status error, and has no content,
+		# add default content.
+		push @{$result->[2]}, status_message($result->[0]);
+	}
 	return $result;
 }
 
@@ -391,34 +492,155 @@ sub call {
 
 sub to_app {
 	my $self= shift;
+	# Make sure actions_cache is initialized
+	$self->actions_cache;
 	sub { $self->call(shift) };
 }
 
-=head1 IMPLEMENTATION ATTRIBUTES
+=head1 IMPLEMENTATION DETAILS
 
-=head2 conserve_actions
+=head2 conserve_actions_for_class
 
-An arrayref listing the actions of this class and any parent class.
-These default to the list collected from the C<Serve> method attributes.
-For example,
+  my $array= Web::ConServe->conserve_actions_for_class($class, %opts);
 
-  sub foo : Serve( / ) {}
-  sub bar : Serve( /bar GET,HEAD,OPTIONS ) {}
+Return the arrayrefs of actions defined on the classes.
 
-results in
+Options:
 
-  conserve_actions => [
-    { handler => \&foo, path => '/' },
-    { handler => \&bar, path => '/bar', methods => {GET=>1, HEAD=>1, OPTIONS=>1} },
-  ]
+=over
 
-These are built into a dispatcher by L<conserve_compile_actions>.
-If you modify these at runtime, be sure to call L<clear_conserve_search_action_fn>
-to make sure it gets rebuilt.
+=item inherited
 
-=head2 conserve_search_action_fn
+Include all actions from parent classes of the given class.
 
-A coderef which implements the same API as L</search_actions>.
+=item lvalue
+
+Return the actual arrayref holding the actions, for modification by Plugins,
+etc.  Changes are B<not> reflected on existing object instances, only newly
+created ones.  Note that all action hashrefs are still read-only.
+
+=back
+
+=head2 conserve_register_action
+
+  $class->conserve_register_action( \%action );
+
+Add an action to the package-level list for C<$class>.  The action is passed to
+L<Const::Fast/const> to ensure safe behavior without needing to make copies.
+
+=cut
+
+our %class_actions;  # List of actions, keyed by ->{$class}
+
+sub conserve_actions_for_class {
+	my ($self, $class, %opts)= @_;
+	if ($opts{inherited}) {
+		croak "lvalue and inherited are mutually exclusive" if $opts{lvalue};
+		my @all= grep defined, map $class_actions{$_}, @{mro::get_linear_isa($class)};
+		return [ map @$_, @all ];
+	}
+	return ($class_actions{$class} //= [])
+		if $opts{lvalue};
+	return [ @{ $class_actions{$class} // [] } ];
+}
+
+sub conserve_register_action {
+	my ($class, $action)= @_;
+	ref $class and croak "register_action should be called on a class, not an instance\n"
+		."(yes I could just DoWhatYouMean, but there's a good chance you're doing it wrong if you call this on an instance)";
+	const my %act => %$action;
+	push @{$class_actions{$class}}, \%act;
+}
+
+=head2 conserve_parse_action
+
+  my $rule_data= $self->conserve_parse_action( $action_spec, \$err_msg )
+                 or croak $err_msg;
+  # input:   /foo/:bar/* GET,PUT local_client
+  # output:  {
+  #            path => '/foo/*/*',
+  #            methods => { GET => 1, PUT => 1 },
+  #            flags => { local_client => conserve_FLAG_TRUE },
+  #            capture_names => ['bar',''],
+  #            match_fn => sub { ... },
+  #          } 
+
+=cut
+
+sub conserve_FLAG_TRUE { \1 }
+sub conserve_parse_action {
+	my ($class, $text, $err_ref)= @_;
+	my %action;
+	# Remove quotes (which are unnecessary, but users might like for syntax hilighting)
+	if ($text =~ /^(["'])(.*?)\g{-2}$/) {
+		# TODO: add warnings about mistaken quoted string behavior
+		$text= $2;
+	}
+	for my $part (split / +/, $text) {
+		if ($part =~ m,^/,) {
+			if (defined $action{path}) {
+				$$err_ref= 'Multiple paths defined' if $err_ref;
+				return;
+			}
+			if (index($part, ':') >= 0) {
+				# If :NAME, the capture name is 'NAME'
+				# If '*', the capture name is empty-string
+				$action{capture_names}= [ $part =~ /(?|:(\w+)|\*())/g ];
+				# Afterward, replace the name with a '*', for simpler processing
+				$part =~ s/:(\w+)/\*/g;
+			}
+			$action{path}= $part;
+		}
+		elsif ($part =~ /^[A-Z]/) {
+			$action{methods}{$_}++ for split ',', $part;
+		}
+		elsif ($part =~ /^\w/) {
+			my ($name, $value)= split /=/, $part, 2;
+			$action{flags}{$name}= defined $value? $value : conserve_FLAG_TRUE;
+		}
+		else {
+			$$err_ref= "Can't parse action, at '$part'" if $err_ref;
+			return;
+		}
+	}
+	unless (defined $action{path}) {
+		$$err_ref= "path is required (starting with leading '/')" if $err_ref;
+		return;
+	}
+	# Every action comes with a match coderef, so that subclasses can wrap
+	# eachother's coderef with additional testing or return values.
+	$action{match_fn}= $class->_conserve_create_action_match_fn(\%action);
+	return \%action;
+}
+
+=head2 :Serve(...)
+
+The C<:Serve(...)> code-attributes are simply perl's attribute system,
+described in C<perldoc attributes>.  Each time one is encountered during the
+initial parse of the class, Perl calls the method L</MODIFY_CODE_ATTRIBUTES>.
+The implementation in C<Web::ConServe> filters out C<Serve()> and passes it to
+L</conserve_parse_action>, and then passes that to L</conserve_register_action>.
+
+=over
+
+=item If you want to change the way Serve is parsed:
+
+Override method L</conserve_parse_action>.
+
+=item If you want to add other attributes:
+
+Make a new Plugin, then have that plugin add itself as a parent class, then
+implement your own C<MODIFY_CODE_ATTRIBUTES> and C<FETCH_CODE_ATTRIBUTES>.
+
+=item If you want to create actions on a class:
+
+Call L</conserve_register_action>.
+
+=item If you want to create actions on an instance:
+
+Clone and modify L</actions> and then call L</clear_actions_cache>.
+
+=back
 
 =cut
 
@@ -435,7 +657,7 @@ sub MODIFY_CODE_ATTRIBUTES {
 	my $super= __PACKAGE__->next::can;
 	my @unknown;
 	for (@_) {
-		if ($_ =~ /^Serve\(([^)]+)\)/) {
+		if ($_ =~ /^Serve\((.*?)\)$/) {
 			my $action= $class->conserve_parse_action($1, \my $err);
 			defined $action or croak "$err, in attribute $_";
 			$action->{handler}= $coderef;
@@ -449,107 +671,24 @@ sub MODIFY_CODE_ATTRIBUTES {
 	return $super? $super->($class, $coderef, @unknown) : @unknown;
 }
 
-our %class_actions;  # List of actions, keyed by ->{$class}
-
-sub conserve_register_action {
-	my ($class, $action)= @_;
-	ref $class and croak "register_action should be called on a class, not an instance\n"
-		."(yes I could just DoWhatYouMean, but there's a good chance you're doing it wrong if you call this on an instance)";
-	push @{$class_actions{$class}}, $action;
-}
-sub conserve_unregister_action {
-	my ($class, $action)= @_;
-	ref $class and croak "register_action should be called on a class, not an instance\n"
-		."(yes I could just DoWhatYouMean, but there's a good chance you're doing it wrong if you call this on an instance)";
-	my $list= $class_actions{$class};
-	@$list= grep $_ ne $action, @$list
-		if $list;
-	return;
+sub _conserve_find_actions {
+	my ($self, $req)= @_;
+	$req //= $self->req;
+	my $tree= $self->actions_cache;
+	my $result= { captures => [], action_rejects => [] };
+	return
+		($self->_conserve_find_actions_in_tree($req, $tree, $req->env->{PATH_INFO}, $result)?
+			( $result->{action} ) : ()
+		),
+		@{$result->{action_rejects}};
 }
 
-has conserve_actions => ( is => 'lazy', clearer => 1, predicate => 1, trigger => \&clear_conserve_search_action_fn );
-sub _build_conserve_actions {
-	my $self= shift;
-	my @all_inherited= grep defined, map $class_actions{$_}, @{mro::get_linear_isa(ref $self or $self)};
-	[ map @$_, @all_inherited ];
-}
-
-has conserve_search_action_fn => ( is => 'lazy', clearer => 1, predicate => 1 );
-sub _build_conserve_search_action_fn {
-	my $self= shift;
-	$self->conserve_compile_actions($self->conserve_actions)
-}
-
-=head1 IMPLEMENTATION METHODS
-
-=head2 conserve_parse_action
-
-  my $rule_data= $self->conserve_parse_action( $action_spec, \$err_msg )
-                 or croak $err_msg;
-  # input:   /foo/:bar/* GET,PUT local_client
-  # output:  { path => '/foo/:bar/*', match_fn => sub { ... } } 
-
-=head2 conserve_compile_actions
-
-  my $coderef= $self->conserve_compile_actions( \@rules );
-
-Compiles the list of rules (defaulting to L</conserve_actions>) into a
-coderef which can efficiently match them against a request object.  Rules may
-be un-parsed strings or parsed data.  This is the default implementation
-behind L</search_actions>.
-
-=cut
-
-sub conserve_FLAG_TRUE { \1 }
-sub conserve_parse_action {
-	my ($class, $text, $err_ref)= @_;
-	my %action;
-	for my $part (split / +/, $text) {
-		if ($part =~ m,^/,) {
-			if (defined $action{path}) {
-				$$err_ref= 'Multiple paths defined' if $err_ref;
-				return;
-			}
-			if (index($part, ':') >= 0) {
-				$action{capture_names}= [ $part =~ /:(\w+)/g ];
-				$part =~ s/:(\w+)/\*$1/g;
-			}
-			$action{path}= $part;
-		} elsif ($part =~ /^[A-Z]/) {
-			$action{methods}{$_}++ for split ',', $part;
-		} elsif ($part =~ /^\w/) {
-			my ($name, $value)= split /=/, $part, 2;
-			$action{flags}{$name}= defined $value? $value : conserve_FLAG_TRUE;
-		}
-		else {
-			$$err_ref= "Can't parse action, at '$part'" if $err_ref;
-			return;
-		}
-	}
-	return \%action;
-}
-
-sub conserve_compile_actions {
-	my ($self, $actions)= @_;
-	$actions ||= $self->conserve_actions;
-	my $tree= $self->_conserve_build_action_tree($actions);
-	return sub {
-		my ($self, $req)= @_;
-		$req //= $self->req;
-		my $result= { captures => [], action_rejects => [] };
-		return
-			($self->_conserve_search_actions($req, $tree, $req->env->{PATH_INFO}, $result)?
-				( $result->{action} ) : ()
-			),
-			@{$result->{action_rejects}};
-	};
-}
 sub _conserve_build_action_tree {
-	my ($self, $actions)= @_;
+	my ($class, $actions)= @_;
 	# Tree up the actions according to prefix
 	my %tree= ( path => {} );
 	for my $action (@$actions) {
-		$action->{match_fn}= $self->_conserve_create_action_match_fn($action);
+		$action->{match_fn} //= $class->_conserve_create_action_match_fn($action);
 		my $remainder= $action->{path};
 		my $node= $tree{path};
 		my @capture_names;
@@ -590,33 +729,25 @@ sub _conserve_build_action_tree {
 sub _conserve_make_subpath_cap_regexes {
 	my $node= $_;
 	return unless $node->{path};
-	# add all of wild to the end of wild_cap.
-	# (could have added them sooner, but want them to be at end of the list)
-	for (values %{$node->{path}}) {
-		push @{ $node->{wild_cap} }, map [qr/(.*)/, $_], @{ $node->{wild} }
-			if $node->{wild};
-	}
 	
-	for my $var ('path','wild_cap') {
-		# Make a list of all sub-paths which involve a capture
-		my @keys_with_cap= sort { $a cmp $b }
-			grep $node->{path}{$_}{$var},
-			keys %{$node->{path}}
-			or return;
-		
-		# Build regex OR expression of each path, with longer strings taking precedence
-		my $or_expression= join '|', map "\Q$_\E", reverse @keys_with_cap;
-		$node->{'sub_'.$var.'_re'}= qr,^($or_expression),;
+	# Make a list of all sub-paths which involve a capture
+	my @keys_with_cap= sort { $a cmp $b }
+		grep $node->{path}{$_}{path} || $node->{path}{$_}{wild} || $node->{path}{$_}{wild_cap},
+		keys %{$node->{path}}
+		or return;
 	
-		# Find every case of a longer string which also has a prefix, and record the fallback
-		my %seen;
-		for my $key (@keys_with_cap) {
-			$seen{$key}++;
-			for (map substr($key, 0, $_), reverse 1..length($key)-1) {
-				if ($seen{$_}) {
-					$node->{path}{$key}{$var.'_backtrack'}= $_;
-					last;
-				}
+	# Build regex OR expression of each path, with longer strings taking precedence
+	my $or_expression= join '|', map "\Q$_\E", reverse @keys_with_cap;
+	$node->{sub_path_re}= qr,^($or_expression),;
+	
+	# Find every case of a longer string which also has a prefix, and record the fallback
+	my %seen;
+	for my $key (@keys_with_cap) {
+		$seen{$key}++;
+		for (map substr($key, 0, $_), reverse 1..length($key)-1) {
+			if ($seen{$_}) {
+				$node->{path}{$key}{path_backtrack}= $_;
+				last;
 			}
 		}
 	}
@@ -624,60 +755,57 @@ sub _conserve_make_subpath_cap_regexes {
 	&_conserve_make_subpath_cap_regexes for values %{$node->{path}};
 }
 
-sub _conserve_search_actions {
+our $DEBUG_FIND_ACTIONS;
+sub _conserve_find_actions_in_tree {
 	my ($self, $req, $node, $path, $result)= @_;
 	my $next;
 	# Step 1, quickly dispatch any static path, or exact-matching wildcard prefix
-	#print STDERR "test $path vs ".join(', ', keys %{$node->{path}})."\n";
-	if ($node->{path} and ($next= $node->{path}{$path})) {
+	$DEBUG_FIND_ACTIONS && $DEBUG_FIND_ACTIONS->("test $path vs constant ".join(', ', keys %{$node->{path}}));
+	if ($node->{path} and ($next= $node->{path}{$path}) and $next->{actions}) {
 		# record that there was at least one full match
 		$result->{path_match}= $req->path_info;
-		# Check absolutes first
-		if ($next->{actions}) {
-			$self->_conserve_search_actions_check($_, $req, $result) && return 1
-				for @{ $next->{actions} };
-		}
-		# Then check any wildcard whose entire prefix matched
-		if ($next->{wild}) {
-			$self->_conserve_search_actions_check($_, $req, $result) && return 1
-				for @{ $next->{wild} };
-		}
+		$self->_conserve_find_actions_check($_, $req, $result) && return 1
+			for @{ $next->{actions} };
 	}
 	# Step 2, check for a path that we can capture a portion of, and recursively continue
-	#print STDERR "test $path vs $node->{sub_path_re}\n" if $node->{sub_path_re};
 	if ($node->{sub_path_re}) {
+		$DEBUG_FIND_ACTIONS && $DEBUG_FIND_ACTIONS->("test $path vs capture $node->{sub_path_re}\n");
 		my ($prefix)= ($path =~ $node->{sub_path_re});
 		while (defined $prefix) {
-			#print STDERR "try removing $prefix\n";
+			$DEBUG_FIND_ACTIONS && $DEBUG_FIND_ACTIONS->("try removing $prefix");
 			$next= $node->{path}{$prefix} or die "invalid path tree";
-			my ($wild, $suffix)= (substr($path, length $prefix) =~ m,([^/]*)(.*),);
-			push @{$result->{captures}}, $wild;
-			return 1 if $self->_conserve_search_actions($req, $next, $suffix, $result);
-			pop @{$result->{captures}};
-			$prefix= $next->{path_backtrack};
-		}
-	}
-	# Step 3, check for a wildcard that can match the full remainder of the path
-	#print STDERR "test $path vs $node->{sub_wild_cap_re}\n" if $node->{sub_wild_cap_re};
-	if ($node->{sub_wild_cap_re}) {
-		my ($prefix)= ($path =~ $node->{sub_wild_cap_re});
-		while (defined $prefix) {
-			#print STDERR "try removing $prefix\n";
-			$next= $node->{path}{$prefix} or die "invalid path tree";
+			
+			# First, check for single-component captures
 			my $remainder= substr($path, length($prefix));
-			for my $wild_item (@{ $next->{wild_cap} }) {
-				#print STDERR "try $remainder vs $wild_item->[0]\n";
-				if (my (@more_caps)= ($remainder =~ $wild_item->[0])) {
-					push @{ $result->{captures} }, @more_caps;
-					# Record that we found a match up to the wildcard
-					my $match= substr($req->path_info, 0, -length($remainder));
-					$result->{path_match}= $match;
-					return 1 if $self->_conserve_search_actions_check($wild_item->[1], $result);
-					# Restore previous captures
-					splice @{$result->{captures}}, -scalar @more_caps;
+			my ($wild, $suffix)= ($remainder =~ m,([^/]*)(.*),);
+			push @{$result->{captures}}, $wild;
+			return 1 if $self->_conserve_find_actions_in_tree($req, $next, $suffix, $result);
+			pop @{$result->{captures}};
+			
+			# Else check for wildcard captures.  This isn't recursive because there's no way
+			# to know how much path to capture, so just check each action's regex in sequence.
+			$result->{path_match}= substr($req->path_info, 0, -length($remainder));
+			if ($next->{wild_cap}) {
+				for my $wild_item (@{ $next->{wild_cap} }) {
+					$DEBUG_FIND_ACTIONS && $DEBUG_FIND_ACTIONS->("try $remainder vs $wild_item->[0]");
+					if (my (@more_caps)= ($remainder =~ $wild_item->[0])) {
+						push @{ $result->{captures} }, @more_caps;
+						return 1 if $self->_conserve_find_actions_check($wild_item->[1], $result);
+						# Restore previous captures
+						splice @{$result->{captures}}, -scalar @more_caps;
+					}
 				}
 			}
-			$prefix= $next->{wild_cap_backtrack};
+			if ($next->{wild}) {
+				$DEBUG_FIND_ACTIONS && $DEBUG_FIND_ACTIONS->("try $remainder vs '**'");
+				push @{$result->{captures}}, $remainder;
+				$self->_conserve_find_actions_check($_, $req, $result) && return 1
+					for @{ $next->{wild} };
+				pop @{$result->{captures}};
+			}
+			
+			$DEBUG_FIND_ACTIONS && $DEBUG_FIND_ACTIONS->("backtrack to ".($next->{path_backtrack}//'(none)'));
+			$prefix= $next->{path_backtrack};
 		}
 	}
 	# No match, but might need to backtrack to a different wildcard from caller
@@ -685,34 +813,48 @@ sub _conserve_search_actions {
 }
 
 sub _conserve_create_action_match_fn {
-	my ($self, $action)= @_;
+	my ($class, $action)= @_;
 	# TODO: maybe eval this into a more optimized form
 	my $methods= $action->{methods};
 	my $flags= $action->{flags};
-	sub {
-		return mismatch => 'method'
-			unless !$methods || $methods->{$_[1]->env->{REQUEST_METHOD}};
-		if ($flags) {
+	$methods && $flags? sub {
+			return mismatch => 'method'
+				unless $methods->{$_[1]->env->{REQUEST_METHOD}};
 			for (keys %{$flags}) {
 				my $v= $_[1]->flags->{$_};
 				return mismatch => 'flag'
 					unless defined $v && $flags->{$_} eq $v
 						or $flags->{$_} == conserve_FLAG_TRUE && $v;
 			}
+			return;
 		}
-		return
-	};
+	: $methods? sub {
+			return mismatch => 'method'
+				unless $methods->{$_[1]->env->{REQUEST_METHOD}};
+			return;
+		}
+	: $flags? sub {
+			for (keys %{$flags}) {
+				my $v= $_[1]->flags->{$_};
+				return mismatch => 'flag'
+					unless defined $v && $flags->{$_} eq $v
+						or $flags->{$_} == conserve_FLAG_TRUE && $v;
+			}
+			return;
+		}
+	: sub { return; };
 }
 
 # Path matches, so then check other conditions needed for match.
 # Also combine all the relevant data into the hashref for the action.
-sub _conserve_search_actions_check {
+sub _conserve_find_actions_check {
 	my ($self, $action, $req, $result)= @_;
+	$DEBUG_FIND_ACTIONS && $DEBUG_FIND_ACTIONS->("Path match; checking ".$req->env->{PATH_INFO}." attrs vs. action ".$action->{path});
 	my %info= (
 		%$action,
 		path_match => $result->{path_match},
 		captures   => [ @{ $result->{captures} } ],
-		(defined $action->{match_fn}? $action->{match_fn}->($self, $req) : ())
+		$action->{match_fn}->($self, $req)
 	);
 	if ($info{capture_names}) {
 		my %cap;
@@ -749,6 +891,11 @@ The lower the learning curve, the faster a developer can make full use of
 a module.  The simpler the design, the less code you need to write to do
 something unusual, and the less hair you pull out when you make a mistake.
 
+=item Be extensible
+
+Nothing is more annoying than finding out that you can't extend a framework in
+the way that you want.
+
 =item Be convenient
 
 Somewhat at odds with minimalism, but make sure that users can quickly
@@ -762,7 +909,7 @@ to add these common features, or plugins that provide them the common way.
 =item Scale
 
 Even though it's simple/lightweight, the framework should be able to scale
-to larger applications, because rarely do people actually know the full scopre
+to larger applications, because rarely do people actually know the full scope
 of a project before they start.
 
 =back
@@ -786,20 +933,21 @@ but I don't anticipare much of it needing to be customized.
 
 =item Public Request Lifecycle
 
-All aspects of the request lifecycle are a public part of the API.  There
+Each step of the request lifecycle is a public part of the API.  There
 is little "magic under the hood".  Users can depend on this mechanism remaining
-unchanged.  The dispatch mechanism follows a mostly obvious design with methods
-at each point where someone might want to customize it.
+unchanged.  The dispatch mechanism follows a mostly obvious design, and I split
+each step into its own small method in hopes that just subclassing or wrapping
+these methods can handle any customization that someone needs.
 
 =item Sugar-friendly
 
 The C<use>-line for C<Web::ConServe> has a syntax in the style of a command
-line argument list, making it easy to specify a list of inheritance changes or
-plugins.
+line argument list, making it easy to pull in plugins or roles and ask for
+other behavior all in a flat list.
 
-With the default plugin system allowing both imports and OOP changes, this
-should make everyone's wildest dreams possible while requring a very minimal
-declaration at the top of the file.
+With the plugin system allowing both imports and Moo inheritance changes,
+this should make everyone's wildest dreams possible while requring a very
+minimal declaration at the top of the file.
 
 =item Loose "MVC"
 
@@ -809,20 +957,20 @@ decide the level of abstraction they want here.
 
 The Model is completely up to the user and can be loaded as an attribute.
 
-=item Compiled Dispatcher
+=item Cached Dispatcher
 
 The most complexity of the entire framework is in the compilation phase of the
 dispatcher.  It trees up the available actions in a data structure that allows
 efficient search of matching actions, so it should scale to arbitrarily large
-applications.  The API is simply "A coderef which returns a list of actions
-matching a request", so the implementation can change as needed without
-breaking anything, and users are free to implement their own if they have a
-faster way of matching actions.
+applications.  But, the tree isn't public to the API, so the implementation
+can change as needed without breaking anything, and users are free to
+implement their own if they have a faster way of matching actions.
 
-=item Chainable
+=item Nestable
 
 Also part of scalability, the Request object has convenience methods to help
-dispatch a request to a sub-controller.
+dispatch a request to a sub-controller.  You can then create arbitrary trees
+of controllers.
 
 =item No Policy Where Not Needed
 

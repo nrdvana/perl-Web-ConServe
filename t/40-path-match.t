@@ -11,36 +11,36 @@ use_ok 'Web::ConServe'
 	or BAIL_OUT;
 
 sub simple_path {
-	my $c= Web::ConServe->new();
 	my @actions= (
 		{ path => '/foo', methods => { GET => 1 } },
 		{ path => '/bar', methods => { GET => 1 } },
 		{ path => '/baz', methods => { GET => 1 } },
 	);
-	my $search_fn= $c->conserve_compile_actions(\@actions);
+	my $c= Web::ConServe->new(actions => \@actions);
 	my @tests= (
 		[ '/foo' => { %{$actions[0]}, path_match => '/foo', captures => [] } ],
 		[ '/bar' => { %{$actions[1]}, path_match => '/bar', captures => [] } ],
 		[ '/baz' => { %{$actions[2]}, path_match => '/baz', captures => [] } ],
 	);
 	for (@tests) {
-		my ($path, $action_info)= @$_;
+		my ($path, @expected)= @$_;
 		my $env= make_env(PATH_INFO => $path);
 		my $req_c= $c->accept_request($env);
-		is_deeply( [$search_fn->($req_c)], [$action_info], "path $path" );
+		my @found= $req_c->find_actions;
+		delete $_->{match_fn} for @found; # can't compare coderef
+		is_deeply( \@found, \@expected, "path $path" );
 	}
 }
 subtest simple_path => \&simple_path;
 
 sub path_with_capture {
-	my $c= Web::ConServe->new();
 	my @actions= (
 		{ path => '/foo/*',     methods => { GET => 1 } },
 		{ path => '/foo/*/bar', methods => { GET => 1 } },
 		{ path => '/fo*/bar',   methods => { GET => 1 } },
 		{ path => '/foo*/baz',  methods => { GET => 1 } },
 	);
-	my $search_fn= $c->conserve_compile_actions(\@actions);
+	my $c= Web::ConServe->new(actions => \@actions);
 	my @tests= (
 		[ '/foo'       => () ],
 		[ '/foo/1'     => { %{$actions[0]}, path_match => '/foo/1', captures => [1] } ],
@@ -53,7 +53,9 @@ sub path_with_capture {
 		my ($path, @expected)= @$_;
 		my $env= make_env(PATH_INFO => $path);
 		my $req_c= $c->accept_request($env);
-		is_deeply( [$search_fn->($req_c)], \@expected, "path $path" );
+		my @found= $req_c->find_actions;
+		delete $_->{match_fn} for @found; # can't compare coderef
+		is_deeply( \@found, \@expected, "path $path" );
 	}
 }
 subtest path_with_capture => \&path_with_capture;
@@ -67,14 +69,13 @@ subtest path_with_capture => \&path_with_capture;
 #};
 
 sub path_with_named_capture {
-	my $c= Web::ConServe->new();
 	my @actions= (
 		{ path => '/foo/*',     methods => { GET => 1 }, capture_names => ['x'] },
 		{ path => '/foo/*/bar', methods => { GET => 1 }, capture_names => ['y'] },
 		{ path => '/fo*/bar',   methods => { GET => 1 }, capture_names => ['x'] },
 		{ path => '/foo*/baz',  methods => { GET => 1 }, capture_names => ['x'] },
 	);
-	my $search_fn= $c->conserve_compile_actions(\@actions);
+	my $c= Web::ConServe->new(actions => \@actions);
 	my @tests= (
 		[ '/foo'       => () ],
 		[ '/foo/1'     => { %{$actions[0]}, path_match => '/foo/1', captures => [1], captures_by_name => { x => 1 } } ],
@@ -87,7 +88,9 @@ sub path_with_named_capture {
 		my ($path, @expected)= @$_;
 		my $env= make_env(PATH_INFO => $path);
 		my $req_c= $c->accept_request($env);
-		is_deeply( [$search_fn->($req_c)], \@expected, "path $path" );
+		my @found= $req_c->find_actions;
+		delete $_->{match_fn} for @found; # can't compare coderef
+		is_deeply( \@found, \@expected, "path $path" );
 	}
 }
 subtest path_with_named_capture => \&path_with_named_capture;
