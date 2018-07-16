@@ -345,7 +345,7 @@ sub accept_request {
 
 sub search_actions {
 	my ($self, $req)= @_;
-	return $self->conserve_search_action_fn->($req // $self->req);
+	return $self->conserve_search_action_fn->($self, $req // $self->req);
 }
 
 sub dispatch {
@@ -361,13 +361,13 @@ sub dispatch {
 		if $action;
 	
 	# If nothing matched, then return 404
-	return Web::ConServe::Plugin::Res::res_not_found()
+	return [404, []]
 		unless @matches;
 	# If all matches returned 'mismatch=method', then return 405
-	return Web::ConServe::Plugin::Res::res_bad_method()
+	return [405, []]
 		unless grep $_->{mismatch} ne 'method', @matches;
 	# Else some specific user requirement was not met, so return 422
-	return Web::ConServe::Plugin::Res::res_unprocessable();
+	return [422, []]
 }
 
 sub view {
@@ -422,32 +422,56 @@ A coderef which implements the same API as L</search_actions>.
 
 =cut
 
-our %class_actions;
+our %method_attrs;   # List of attributes keyed by ->{$class}{$coderef}
+
 sub FETCH_CODE_ATTRIBUTES {
 	my ($class, $coderef)= (shift, shift);
 	my $super= __PACKAGE__->next::can;
-	return (grep { ref $_ ne 'CODE' } @{$class_actions{$class}{$coderef} || []}),
+	return @{$method_attrs{$class}{$coderef} || []},
 		($super? $super->($class, $coderef, @_) : ());
 }
 sub MODIFY_CODE_ATTRIBUTES {
 	my ($class, $coderef)= (shift, shift);
 	my $super= __PACKAGE__->next::can;
-	my (@known, @unknown);
-	@known= grep { $_ =~ /^Serve\(([^)]+)\)/ or do { push(@unknown, $_); 0 } } @_;
-	for (@known) {
-		my $rule= $class->conserve_parse_action($1, \my $err);
-		defined $rule or croak "$err, in attribute $_";
-		$rule->{handler}= $coderef;
-		push @{$class_actions{$class}{$coderef}}, $rule;
+	my @unknown;
+	for (@_) {
+		if ($_ =~ /^Serve\(([^)]+)\)/) {
+			my $action= $class->conserve_parse_action($1, \my $err);
+			defined $action or croak "$err, in attribute $_";
+			$action->{handler}= $coderef;
+			push @{$method_attrs{$class}{$coderef}}, $_;
+			$class->conserve_register_action($action);
+		}
+		else {
+			push @unknown, $_;
+		}
 	}
 	return $super? $super->($class, $coderef, @unknown) : @unknown;
+}
+
+our %class_actions;  # List of actions, keyed by ->{$class}
+
+sub conserve_register_action {
+	my ($class, $action)= @_;
+	ref $class and croak "register_action should be called on a class, not an instance\n"
+		."(yes I could just DoWhatYouMean, but there's a good chance you're doing it wrong if you call this on an instance)";
+	push @{$class_actions{$class}}, $action;
+}
+sub conserve_unregister_action {
+	my ($class, $action)= @_;
+	ref $class and croak "register_action should be called on a class, not an instance\n"
+		."(yes I could just DoWhatYouMean, but there's a good chance you're doing it wrong if you call this on an instance)";
+	my $list= $class_actions{$class};
+	@$list= grep $_ ne $action, @$list
+		if $list;
+	return;
 }
 
 has conserve_actions => ( is => 'lazy', clearer => 1, predicate => 1, trigger => \&clear_conserve_search_action_fn );
 sub _build_conserve_actions {
 	my $self= shift;
-	my @all_inherited= grep defined, map $class_actions{$_}, mro::get_linear_isa(ref $self);
-	[ map @$_, map { $_? values %$_ : () } @all_inherited ];
+	my @all_inherited= grep defined, map $class_actions{$_}, @{mro::get_linear_isa(ref $self or $self)};
+	[ map @$_, @all_inherited ];
 }
 
 has conserve_search_action_fn => ( is => 'lazy', clearer => 1, predicate => 1 );
@@ -478,31 +502,31 @@ behind L</search_actions>.
 
 sub conserve_FLAG_TRUE { \1 }
 sub conserve_parse_action {
-	my ($self, $text, $err_ref)= @_;
-	my %rule;
+	my ($class, $text, $err_ref)= @_;
+	my %action;
 	for my $part (split / +/, $text) {
 		if ($part =~ m,^/,) {
-			if (defined $rule{path}) {
+			if (defined $action{path}) {
 				$$err_ref= 'Multiple paths defined' if $err_ref;
 				return;
 			}
 			if (index($part, ':') >= 0) {
-				$rule{capture_names}= [ $part =~ /:(\w+)/g ];
+				$action{capture_names}= [ $part =~ /:(\w+)/g ];
 				$part =~ s/:(\w+)/\*$1/g;
 			}
-			$rule{path}= $part;
+			$action{path}= $part;
 		} elsif ($part =~ /^[A-Z]/) {
-			$rule{methods}{$_}++ for split ',', $part;
+			$action{methods}{$_}++ for split ',', $part;
 		} elsif ($part =~ /^\w/) {
 			my ($name, $value)= split /=/, $part, 2;
-			$rule{flags}{$name}= defined $value? $value : conserve_FLAG_TRUE;
+			$action{flags}{$name}= defined $value? $value : conserve_FLAG_TRUE;
 		}
 		else {
-			$$err_ref= "Can't parse rule, at '$part'" if $err_ref;
+			$$err_ref= "Can't parse action, at '$part'" if $err_ref;
 			return;
 		}
 	}
-	return \%rule;
+	return \%action;
 }
 
 sub conserve_compile_actions {
@@ -512,12 +536,12 @@ sub conserve_compile_actions {
 	return sub {
 		my ($self, $req)= @_;
 		$req //= $self->req;
-		my $result= { captures => [] };
-		$self->_conserve_search_actions($req, $tree, $req->env->{PATH_INFO}, $result);
-		my @ret;
-		push @ret, $result->{action} if defined $result->{action};
-		push @ret, @{ $result->{action_rejects} } if defined $result->{action_rejects};
-		return @ret;
+		my $result= { captures => [], action_rejects => [] };
+		return
+			($self->_conserve_search_actions($req, $tree, $req->env->{PATH_INFO}, $result)?
+				( $result->{action} ) : ()
+			),
+			@{$result->{action_rejects}};
 	};
 }
 sub _conserve_build_action_tree {
