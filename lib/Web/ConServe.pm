@@ -362,6 +362,12 @@ return the correct HTTP status code.
 Each hashref is a shallow clone of the action, and may have additional fields
 describing the result of the match operation.
 
+If you're having trouble with the pattern matching or captures, you can set
+
+  local $Web::ConServe::DEBUG_FIND_ACTIONS= sub { warn "$_\n" };
+
+to get some diagnostics.
+
 =head2 dispatch
 
   my $something= $app->dispatch; # using app->req
