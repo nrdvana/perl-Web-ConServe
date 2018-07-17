@@ -809,12 +809,14 @@ sub _conserve_find_actions_in_tree {
 			
 			# Else check for wildcard captures.  This isn't recursive because there's no way
 			# to know how much path to capture, so just check each action's regex in sequence.
-			$result->{path_match}= substr($req->path_info, 0, -length($remainder));
 			if ($next->{wild_cap}) {
 				for my $wild_item (@{ $next->{wild_cap} }) {
 					$DEBUG_FIND_ACTIONS && $DEBUG_FIND_ACTIONS->("try $remainder vs $wild_item->[0]");
 					if (my (@more_caps)= ($remainder =~ $wild_item->[0])) {
 						push @{ $result->{captures} }, @more_caps;
+						# path_match should reach to end of string unless regex *ended* with a wildcard.
+						$result->{path_match}= substr($wild_item->[1]{path}, -2) ne '**'? $req->path_info
+							: substr($req->path_info, 0, length($req->path_info)-length($more_caps[-1]));
 						return 1 if $self->_conserve_find_actions_check($wild_item->[1], $req, $result);
 						# Restore previous captures
 						splice @{$result->{captures}}, -scalar @more_caps;
@@ -822,6 +824,7 @@ sub _conserve_find_actions_in_tree {
 				}
 			}
 			if ($next->{wild}) {
+				$result->{path_match}= substr($req->path_info, 0, length($req->path_info)-length($remainder));
 				$DEBUG_FIND_ACTIONS && $DEBUG_FIND_ACTIONS->("try $remainder vs '**'");
 				push @{$result->{captures}}, $remainder;
 				$self->_conserve_find_actions_check($_, $req, $result) && return 1
