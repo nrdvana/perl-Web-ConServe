@@ -19,8 +19,8 @@ use namespace::clean;
     -plugins => qw/ Res /;        # Supports a plugin system
   with 'My::Moo::Role';           # Fully Moo compatible
   
-  # Actions declared with method attributes like Catalyst,
-  # but using the path syntax like Web::Simple
+  # Actions are declared with method attributes like Catalyst,
+  # but using a path syntax like Web::Simple
   # but the application object is a lot more like CGI::Application.
   # Request and Response are Plack-style.
   # You can return Plack arrayref notation, or use sugar methods
@@ -71,7 +71,8 @@ see the L<Cookbook|Web::ConServe::Cookbook> page.
 =head1 APPLICATION LIFECYCLE
 
 In order to make the most of Web::ConServe, you should be fully aware of how
-it operates.
+it operates.  (I think this is true for any tool, which is why I love
+minimalist designs.)
 
 =over
 
@@ -104,7 +105,7 @@ that method, or simply set a custom L</request_class>.
 =item Request Dispatch
 
 Next the plack app calls L</dispatch>.  This looks for the best matching
-rule for the request, then if found, calls that method.  The return value
+action for the request, then if found, calls that method.  The return value
 from the method becomes the response, after pos-processing (described next).
 
 If there was not a matching rule, then the dispatcher sets the response code
@@ -131,7 +132,6 @@ any action.  If that isn't enough, L<PSGI> servers might implement the
 L</psgix.cleanup|PSGI::Extensions/SPECIFICATION> system for you to use.
 Failing that, you could return a PSGI streaming coderef which runs some code
 after the last chunk of data has been delivered to the client.
-It would not be hard to write a plugin which chooses the best method.
 
 =back
 
@@ -364,7 +364,7 @@ describing the result of the match operation.
 
 If you're having trouble with the pattern matching or captures, you can set
 
-  local $Web::ConServe::DEBUG_FIND_ACTIONS= sub { warn "$_\n" };
+  local $Web::ConServe::DEBUG_FIND_ACTIONS= sub { warn "$_[0]\n" };
 
 to get some diagnostics.
 
@@ -566,14 +566,14 @@ sub conserve_register_action {
   # output:  {
   #            path => '/foo/*/*',
   #            methods => { GET => 1, PUT => 1 },
-  #            flags => { local_client => conserve_FLAG_TRUE },
+  #            flags => { local_client => FLAG_TRUE },
   #            capture_names => ['bar',''],
   #            match_fn => sub { ... },
   #          } 
 
 =cut
 
-sub conserve_FLAG_TRUE { \1 }
+sub FLAG_TRUE { \1 }
 sub conserve_parse_action {
 	my ($class, $text, $err_ref)= @_;
 	my %action;
@@ -602,7 +602,7 @@ sub conserve_parse_action {
 		}
 		elsif ($part =~ /^\w/) {
 			my ($name, $value)= split /=/, $part, 2;
-			$action{flags}{$name}= defined $value? $value : conserve_FLAG_TRUE;
+			$action{flags}{$name}= defined $value? $value : FLAG_TRUE;
 		}
 		else {
 			$$err_ref= "Can't parse action, at '$part'" if $err_ref;
@@ -699,8 +699,8 @@ sub _conserve_build_action_tree {
 		my $node= $tree{path};
 		my @capture_names;
 		while (1) {
-			# Find the longest non-wildcard prefix of path
-			my ($prefix, $wild, $suffix)= $remainder =~ m,^([^*]*)(\**)(.*),
+			# Find the longest non-wildcard prefix of path, followed by '*' or '**'
+			my ($prefix, $wild, $suffix)= $remainder =~ m,^([^*]*)(\*?\*?)(.*),
 				or die "Bug: '$remainder'";
 			if (!length $wild) { # path ends at this node
 				push @{ $node->{$prefix}{actions} }, $action
@@ -713,16 +713,35 @@ sub _conserve_build_action_tree {
 			}
 			elsif ($wild eq '**') {
 				length $prefix or die "bug";
-				# After a wildcard, it is impossible to continue iteratively capturing,
-				# because no way to know how many characters to consume.  So, just build a
-				# list of regexes to try.  First match wins.
-				if (length $suffix) {
-					$suffix =~ s,(\*+), $1 eq '*' ? '([^/]+)' : '(.*?)' ,ge;
-					push @{ $node->{$prefix}{wild_cap} }, [ qr/$suffix/, $action ];
-				} else {
+				
+				# wildcard-at-end goes into list of ->{wild}
+				if (!length $suffix) {
 					push @{ $node->{$prefix}{wild} }, $action;
+					# If the previous character was '/', then the wild can also apply to
+					# end-of-string one character sooner.
+					if (substr($prefix,-1) eq '/') {
+						push @{ $node->{substr($prefix,0,-1)}{wild_cap} }, [ qr/^()$/, $action ];
+					}
+				}
+				# wildcard-in-middle goes into a list of ->{wild_cap},
+				else {
+					# After a wildcard, it is impossible to continue iteratively capturing,
+					# because no way to know how many characters to consume.  So, just build a
+					# list of regexes to try.  First match wins.
+					
+					my @parts= ( '**', split /(\*\*?)/, $suffix );
+					my $regex_text= '^'.join('', map { $_ eq '*'? '([^/]+)' : $_ eq '**'? '(.*?)' : "\Q$_\E" } @parts).'$';
+					# "/**/" needs to match "/" and "/**" needs to match ""
+					$regex_text =~ s,\\ / \( \. \* \? \) ( \\ / | \$ ) ,(?|/(.*?)|())$1,xg;
+					# If prefix ends with '/', then "**/" can also match ""
+					$regex_text =~ s,\^ \( \. \* \? \) \\ / ,(?|(.*?)/|()),x
+						if substr($prefix,-1) eq '/';
+					push @{ $node->{$prefix}{wild_cap} }, [ qr/$regex_text/, $action ];
 				}
 				last;
+			}
+			else {
+				die "bug";
 			}
 			$remainder= $suffix;
 		}
@@ -775,7 +794,7 @@ sub _conserve_find_actions_in_tree {
 	}
 	# Step 2, check for a path that we can capture a portion of, and recursively continue
 	if ($node->{sub_path_re}) {
-		$DEBUG_FIND_ACTIONS && $DEBUG_FIND_ACTIONS->("test $path vs capture $node->{sub_path_re}\n");
+		$DEBUG_FIND_ACTIONS && $DEBUG_FIND_ACTIONS->("test $path vs capture $node->{sub_path_re}");
 		my ($prefix)= ($path =~ $node->{sub_path_re});
 		while (defined $prefix) {
 			$DEBUG_FIND_ACTIONS && $DEBUG_FIND_ACTIONS->("try removing $prefix");
@@ -796,7 +815,7 @@ sub _conserve_find_actions_in_tree {
 					$DEBUG_FIND_ACTIONS && $DEBUG_FIND_ACTIONS->("try $remainder vs $wild_item->[0]");
 					if (my (@more_caps)= ($remainder =~ $wild_item->[0])) {
 						push @{ $result->{captures} }, @more_caps;
-						return 1 if $self->_conserve_find_actions_check($wild_item->[1], $result);
+						return 1 if $self->_conserve_find_actions_check($wild_item->[1], $req, $result);
 						# Restore previous captures
 						splice @{$result->{captures}}, -scalar @more_caps;
 					}
@@ -825,26 +844,28 @@ sub _conserve_create_action_match_fn {
 	my $flags= $action->{flags};
 	$methods && $flags? sub {
 			return mismatch => 'method'
-				unless $methods->{$_[1]->env->{REQUEST_METHOD}};
+				unless exists $methods->{$_[2]->env->{REQUEST_METHOD}};
 			for (keys %{$flags}) {
-				my $v= $_[1]->flags->{$_};
+				my $expected= $flags->{$_};
+				my $actual= $_[2]->flags->{$_};
 				return mismatch => 'flag'
-					unless defined $v && $flags->{$_} eq $v
-						or $flags->{$_} == conserve_FLAG_TRUE && $v;
+					unless defined $actual && $expected eq $actual
+						or $expected == FLAG_TRUE && $actual;
 			}
 			return;
 		}
 	: $methods? sub {
 			return mismatch => 'method'
-				unless $methods->{$_[1]->env->{REQUEST_METHOD}};
+				unless exists $methods->{$_[2]->env->{REQUEST_METHOD}};
 			return;
 		}
 	: $flags? sub {
 			for (keys %{$flags}) {
-				my $v= $_[1]->flags->{$_};
+				my $expected= $flags->{$_};
+				my $actual= $_[2]->flags->{$_};
 				return mismatch => 'flag'
-					unless defined $v && $flags->{$_} eq $v
-						or $flags->{$_} == conserve_FLAG_TRUE && $v;
+					unless defined $actual && $expected eq $actual
+						or $expected == FLAG_TRUE && $actual;
 			}
 			return;
 		}
@@ -860,7 +881,7 @@ sub _conserve_find_actions_check {
 		%$action,
 		path_match => $result->{path_match},
 		captures   => [ @{ $result->{captures} } ],
-		$action->{match_fn}->($self, $req)
+		$action->{match_fn}->($self, $action, $req)
 	);
 	if ($info{capture_names}) {
 		my %cap;
@@ -877,6 +898,93 @@ sub _conserve_find_actions_check {
 }
 
 1;
+
+=head1 ACTIONS
+
+Each action is a plain hashref.  Why not a class? because I expect that
+it would be highly likely that multiple plugins would try to add additional
+attributes to the Action, and then end up in an inheritance hierarchy war.
+Roles could resolve some of this, but then there would still be the hassle
+of composing the Action class to conform to the needs of all the plugins,
+and the timing of that composition.  The only behavior that needs overridden
+anyway is the check for whether an action matches a request, and that can be
+done easy enough as a coderef within the hash.
+
+An action has the following pre-defined fields:
+
+  {
+    path => '/path/*/**',               # path, with captures
+    capture_names => [ 'id', 'x' ],     # optional name of wildcards in path
+    handler => sub { ... },             # code to execute when dispatching
+    match_fn => sub { ... }             # test whether action matches request
+    methods => { $METHOD => 1, ... },   # set of allowed HTTP methods
+    flags => { $flag1 => $value1, ... } # set of required flags
+  }
+
+=over
+
+=item path
+
+The path must always start with '/'.  A single star character indicates that a
+portion of the URL should be captured up to the next '/'.  For instance,
+C<'/user*/foo'> can capture the user ID from the URL C<"/user12345/foo">.
+If you add a double star at the end of the path, it means that the remainder
+of the URL should be captured, but not considered "consumed".  This helps with
+dispatching to a sub-controller.  You may also use a double star within the
+middle of a path, but this is less efficient and not recommended.  As a special
+case, C<'/**'> may match an empty string, and C<'/**/'> may match C<'/'>.
+
+=item capture_names
+
+In the C<Serve(...)> code-attributes, you can use C<':name'> to indicate a
+named capture.  That isn't valid in the internal path spec, and what you do
+instead is list one name for each wildard in the path.  Use a name of C<''>
+for un-named captures.
+
+=item handler
+
+The coderef to execute when dispatching the action.
+
+  handler => sub {
+    my ($app_instance, @captures)= @_;
+    ...
+  }
+
+=item match_fn
+
+The coderef to execute when testing whether an action matches a request.
+
+  match_fn => sub {
+    my ($app_instance, $action, $request)= @_;
+    ...
+  }
+
+This is only called when the path already matches, so it only needs to check
+C<method> and C<flags> (and anything else you add).
+
+The return value is B<a list of (key,value) pairs> to include in the search
+result of L</find_actions>.  If the action does not match, one of the returned
+keys should be C<mismatch>, and the value should indicate why.  The value
+C<'method'> indicates an HTTP 405, the value C<'permission'> indicates HTTP
+403, and any other value indicates HTTP 422 unless you also customize
+L</dispatch_fail_response>.
+
+=item methods
+
+This is a set of the HTTP methods supported by this action.  Method names must
+be uppercase.
+
+=item flags
+
+This is a set of key/value pairs which must be found on the request.  These
+are entirely user-defined, and the user is responsible for initializing the
+C<< $self->req->flags >> for this comparison.
+
+For example, C<< flags => { x => 1 } >> means that C<< $self->req->flags->{x} == 1 >>
+must be true.  If you want to indicate that a flag must be true, rather than a
+specific value, use C<< flags => { x => Web::ConServe::FLAG_TRUE } >>.
+
+=back
 
 =head1 DESIGN GOALS
 
