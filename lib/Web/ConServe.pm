@@ -5,6 +5,7 @@ use Moo 2;
 use Carp;
 use mro;
 use Web::ConServe::Request;
+use Web::ConServe::PathMatch;
 use Const::Fast 'const';
 use Module::Runtime;
 use HTTP::Status 'status_message';
@@ -271,7 +272,7 @@ sub _build_actions {
 has actions_cache    => ( is => 'lazy', clearer => 1, predicate => 1 );
 sub _build_actions_cache {
 	my $self= shift;
-	$self->_conserve_build_action_tree($self->actions);
+	Web::ConServe::PathMatch->new(nodes => $self->actions);
 }
 
 =head2 app_instance
@@ -677,167 +678,41 @@ sub MODIFY_CODE_ATTRIBUTES {
 	return $super? $super->($class, $coderef, @unknown) : @unknown;
 }
 
+our $DEBUG_FIND_ACTIONS;
 sub _conserve_find_actions {
 	my ($self, $req)= @_;
 	$req //= $self->req;
-	my $tree= $self->actions_cache;
-	my $result= { captures => [], action_rejects => [] };
-	return
-		($self->_conserve_find_actions_in_tree($req, $tree, $req->env->{PATH_INFO}, $result)?
-			( $result->{action} ) : ()
-		),
-		@{$result->{action_rejects}};
-}
-
-sub _conserve_build_action_tree {
-	my ($class, $actions)= @_;
-	# Tree up the actions according to prefix
-	my %tree= ( path => {} );
-	for my $action (@$actions) {
-		$action->{match_fn} //= $class->_conserve_create_action_match_fn($action);
-		my $remainder= $action->{path};
-		my $node= $tree{path};
-		my @capture_names;
-		while (1) {
-			# Find the longest non-wildcard prefix of path, followed by '*' or '**'
-			my ($prefix, $wild, $suffix)= $remainder =~ m,^([^*]*)(\*?\*?)(.*),
-				or die "Bug: '$remainder'";
-			if (!length $wild) { # path ends at this node
-				push @{ $node->{$prefix}{actions} }, $action
-					if $node;
-				last;
-			}
-			elsif ($wild eq '*') {
-				length $prefix or die "bug";
-				$node= ($node->{$prefix}{path} ||= {});
-			}
-			elsif ($wild eq '**') {
-				length $prefix or die "bug";
-				
-				# wildcard-at-end goes into list of ->{wild}
-				if (!length $suffix) {
-					push @{ $node->{$prefix}{wild} }, $action;
-					# If the previous character was '/', then the wild can also apply to
-					# end-of-string one character sooner.
-					if (substr($prefix,-1) eq '/') {
-						push @{ $node->{substr($prefix,0,-1)}{wild_cap} }, [ qr/^()$/, $action ];
-					}
-				}
-				# wildcard-in-middle goes into a list of ->{wild_cap},
-				else {
-					# After a wildcard, it is impossible to continue iteratively capturing,
-					# because no way to know how many characters to consume.  So, just build a
-					# list of regexes to try.  First match wins.
-					
-					my @parts= ( '**', split /(\*\*?)/, $suffix );
-					my $regex_text= '^'.join('', map { $_ eq '*'? '([^/]+)' : $_ eq '**'? '(.*?)' : "\Q$_\E" } @parts).'$';
-					# "/**/" needs to match "/" and "/**" needs to match ""
-					$regex_text =~ s,\\ / \( \. \* \? \) ( \\ / | \$ ) ,(?|/(.*?)|())$1,xg;
-					# If prefix ends with '/', then "**/" can also match ""
-					$regex_text =~ s,\^ \( \. \* \? \) \\ / ,(?|(.*?)/|()),x
-						if substr($prefix,-1) eq '/';
-					push @{ $node->{$prefix}{wild_cap} }, [ qr/$regex_text/, $action ];
-				}
-				last;
-			}
-			else {
-				die "bug";
-			}
-			$remainder= $suffix;
+	local $Web::ConServe::PathMatch::DEBUG= $DEBUG_FIND_ACTIONS if $DEBUG_FIND_ACTIONS;
+	my @result;
+	$self->actions_cache->search($req->env->{PATH_INFO}, sub {
+		my ($action, $captures)= @_;
+		my %info= (
+			%$action,
+			path_match => $req->env->{PATH_INFO},
+			captures   => $captures,
+			$action->{match_fn}->($self, $action, $req)
+		);
+		# If path ends in wildcard, remove the final capture length from the path_match
+		if ($action->{path} =~ /\*\*$/ and @$captures) {
+			substr($info{path_match}, length($info{path_match}) - length($captures->[-1]))= '';
 		}
-	}
-	# For each ->{...}{cap} node, make a {cap_regex} to find the longest prefix
-	&_conserve_make_subpath_cap_regexes for \%tree;
-	\%tree;
-}
-
-sub _conserve_make_subpath_cap_regexes {
-	my $node= $_;
-	return unless $node->{path};
-	
-	# Make a list of all sub-paths which involve a capture
-	my @keys_with_cap= sort { $a cmp $b }
-		grep $node->{path}{$_}{path} || $node->{path}{$_}{wild} || $node->{path}{$_}{wild_cap},
-		keys %{$node->{path}}
-		or return;
-	
-	# Build regex OR expression of each path, with longer strings taking precedence
-	my $or_expression= join '|', map "\Q$_\E", reverse @keys_with_cap;
-	$node->{sub_path_re}= qr,^($or_expression),;
-	
-	# Find every case of a longer string which also has a prefix, and record the fallback
-	my %seen;
-	for my $key (@keys_with_cap) {
-		$seen{$key}++;
-		for (map substr($key, 0, $_), reverse 1..length($key)-1) {
-			if ($seen{$_}) {
-				$node->{path}{$key}{path_backtrack}= $_;
-				last;
-			}
+		# If action defines capture names, build the captures_by_name
+		if ($info{capture_names}) {
+			my %cap;
+			@cap{ @{$info{capture_names}} }= @{ $info{captures} };
+			delete $cap{''}; # used as placeholder for un-named captures
+			$info{captures_by_name}= \%cap;
 		}
-	}
-	# recursively
-	&_conserve_make_subpath_cap_regexes for values %{$node->{path}};
-}
-
-our $DEBUG_FIND_ACTIONS;
-sub _conserve_find_actions_in_tree {
-	my ($self, $req, $node, $path, $result)= @_;
-	my $next;
-	# Step 1, quickly dispatch any static path, or exact-matching wildcard prefix
-	$DEBUG_FIND_ACTIONS && $DEBUG_FIND_ACTIONS->("test $path vs constant ".join(', ', keys %{$node->{path}}));
-	if ($node->{path} and ($next= $node->{path}{$path}) and $next->{actions}) {
-		# record that there was at least one full match
-		$result->{path_match}= $req->path_info;
-		$self->_conserve_find_actions_check($_, $req, $result) && return 1
-			for @{ $next->{actions} };
-	}
-	# Step 2, check for a path that we can capture a portion of, and recursively continue
-	if ($node->{sub_path_re}) {
-		$DEBUG_FIND_ACTIONS && $DEBUG_FIND_ACTIONS->("test $path vs capture $node->{sub_path_re}");
-		my ($prefix)= ($path =~ $node->{sub_path_re});
-		while (defined $prefix) {
-			$DEBUG_FIND_ACTIONS && $DEBUG_FIND_ACTIONS->("try removing $prefix");
-			$next= $node->{path}{$prefix} or die "invalid path tree";
-			
-			# First, check for single-component captures
-			my $remainder= substr($path, length($prefix));
-			my ($wild, $suffix)= ($remainder =~ m,([^/]*)(.*),);
-			push @{$result->{captures}}, $wild;
-			return 1 if $self->_conserve_find_actions_in_tree($req, $next, $suffix, $result);
-			pop @{$result->{captures}};
-			
-			# Else check for wildcard captures.  This isn't recursive because there's no way
-			# to know how much path to capture, so just check each action's regex in sequence.
-			if ($next->{wild_cap}) {
-				for my $wild_item (@{ $next->{wild_cap} }) {
-					$DEBUG_FIND_ACTIONS && $DEBUG_FIND_ACTIONS->("try $remainder vs $wild_item->[0]");
-					if (my (@more_caps)= ($remainder =~ $wild_item->[0])) {
-						push @{ $result->{captures} }, @more_caps;
-						# path_match should reach to end of string unless regex *ended* with a wildcard.
-						$result->{path_match}= substr($wild_item->[1]{path}, -2) ne '**'? $req->path_info
-							: substr($req->path_info, 0, length($req->path_info)-length($more_caps[-1]));
-						return 1 if $self->_conserve_find_actions_check($wild_item->[1], $req, $result);
-						# Restore previous captures
-						splice @{$result->{captures}}, -scalar @more_caps;
-					}
-				}
-			}
-			if ($next->{wild}) {
-				$result->{path_match}= substr($req->path_info, 0, length($req->path_info)-length($remainder));
-				$DEBUG_FIND_ACTIONS && $DEBUG_FIND_ACTIONS->("try $remainder vs '**'");
-				push @{$result->{captures}}, $remainder;
-				$self->_conserve_find_actions_check($_, $req, $result) && return 1
-					for @{ $next->{wild} };
-				pop @{$result->{captures}};
-			}
-			
-			$DEBUG_FIND_ACTIONS && $DEBUG_FIND_ACTIONS->("backtrack to ".($next->{path_backtrack}//'(none)'));
-			$prefix= $next->{path_backtrack};
+		# If match_fn reported a mismatch, keep searching
+		if ($info{mismatch}) {
+			push @result, \%info;
+			return 0;
+		} else {
+			unshift @result, \%info;
+			return 1;
 		}
-	}
-	# No match, but might need to backtrack to a different wildcard from caller
-	return undef;
+	});
+	return @result;
 }
 
 sub _conserve_create_action_match_fn {
@@ -873,31 +748,6 @@ sub _conserve_create_action_match_fn {
 			return;
 		}
 	: sub { return; };
-}
-
-# Path matches, so then check other conditions needed for match.
-# Also combine all the relevant data into the hashref for the action.
-sub _conserve_find_actions_check {
-	my ($self, $action, $req, $result)= @_;
-	$DEBUG_FIND_ACTIONS && $DEBUG_FIND_ACTIONS->("Path match; checking ".$req->env->{PATH_INFO}." attrs vs. action ".$action->{path});
-	my %info= (
-		%$action,
-		path_match => $result->{path_match},
-		captures   => [ @{ $result->{captures} } ],
-		$action->{match_fn}->($self, $action, $req)
-	);
-	if ($info{capture_names}) {
-		my %cap;
-		@cap{ @{$info{capture_names}} }= @{ $info{captures} };
-		$info{captures_by_name}= \%cap;
-	}
-	if ($info{mismatch}) {
-		push @{ $result->{action_rejects} }, \%info;
-		return 0;
-	} else {
-		$result->{action}= \%info;
-		return 1;
-	}
 }
 
 1;
@@ -999,19 +849,20 @@ In order of priority, the goals are:
 
 The less memory an app consumes, the more workers you can run.
 The fewer dependencies you have, the faster you can build docker images.
-The less modules you load at runtime, the less memory footprint you have.
+The more efficient the dispatch cycle, the less processor you need.
 Your app restarts faster.
 
-=item Be simple
+=item Be obvious
 
 The lower the learning curve, the faster a developer can make full use of
-a module.  The simpler the design, the less code you need to write to do
-something unusual, and the less hair you pull out when you make a mistake.
+a module.  The more obvious the design, the less questions the developer
+will have. The simpler the design, the less code you need to write to do
+something unusual, and the less hair you pull out tracking down bugs.
 
 =item Be extensible
 
 Nothing is more annoying than finding out that you can't extend a framework in
-the way that you want.
+the way that you want in the time you have available.
 
 =item Be convenient
 
@@ -1102,6 +953,9 @@ with examples.  (and those could be wrapped into a Plugin)
 
 There is no official filesystem layout, so users can use whatever layout makes
 the most sense for their usage.
+
+Everyone and their cat has a favorite logging system, and even the one for PSGI
+is an optional extension.  So let logging be done with an optional Plugin.
 
 =back
 
