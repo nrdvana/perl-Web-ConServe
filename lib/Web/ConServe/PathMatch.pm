@@ -102,12 +102,16 @@ sub _build_tree {
 					# because no way to know how many characters to consume.  So, just build a
 					# list of regexes to try.  First match wins.
 					
-					my @parts= ( '**', split /(\*\*?)/, $suffix );
-					my $regex_text= '^'.join('', map { $_ eq '*'? '([^/]+)' : $_ eq '**'? '(.*?)' : "\Q$_\E" } @parts).'$';
+					# \Q\E add escapes to "/", which is inconvenient below, so gets handled specifically here
+					my @parts= ( '**', split m{ ( \*\*? | / ) }x, $suffix );
+					my $regex_text= '^'.join('', map { $_ eq '/'? '/' : $_ eq '*'? '([^/]*)' : $_ eq '**'? '(.*?)' : "\Q$_\E" } @parts).'$';
+					# WHEE!  Processing regular expressions with regular expressions!
+					# "/*" needs to match at least one character
+					$regex_text =~ s, / \( \[ \^ / \] \* \) ,/([^/]+),xg;
 					# "/**/" needs to match "/" and "/**" needs to match ""
-					$regex_text =~ s,\\ / \( \. \* \? \) ( \\ / | \$ ) ,(?|/(.*?)|())$1,xg;
+					$regex_text =~ s, / \( \. \* \? \) ( / | \$ ) ,(?|/(.*?)|())$1,xg;
 					# If prefix ends with '/', then "**/" can also match ""
-					$regex_text =~ s,\^ \( \. \* \? \) \\ / ,(?|(.*?)/|()),x
+					$regex_text =~ s,\^ \( \. \* \? \) / ,(?|(.*?)/|()),x
 						if substr($prefix,-1) eq '/';
 					push @{ $node->{$prefix}{wild_cap} }, [ qr/$regex_text/, $action ];
 				}
@@ -155,7 +159,7 @@ sub _make_subpath_cap_regexes {
 
 our $DEBUG;
 sub _search_tree {
-	my ($self, $node, $path, $callback, $captures)= @_;
+	my ($self, $node, $path, $callback, $captures, $from_slash)= @_;
 	my $next;
 	# Step 1, quickly dispatch any static path, or exact-matching wildcard prefix
 	$DEBUG->("test '$path' vs constant (".join(', ', map "'$_'", keys %{$node->{path}}).')') if $DEBUG;
@@ -174,7 +178,11 @@ sub _search_tree {
 			# First, check for single-component captures
 			my $remainder= substr($path, length($prefix));
 			my ($wild, $suffix)= ($remainder =~ m,([^/]*)(.*),);
-			return 1 if $self->_search_tree($next, $suffix, $callback, [ @$captures, $wild ]);
+			# If starting from '/' in the pattern, a '*' must match at least one character
+			my $next_from_slash= length $prefix? substr($prefix, -1) eq '/' : $from_slash;
+			if (length $wild || !$next_from_slash) {
+				return 1 if $self->_search_tree($next, $suffix, $callback, [ @$captures, $wild ], $next_from_slash);
+			}
 			
 			# Else check for wildcard captures.  This isn't recursive because there's no way
 			# to know how much path to capture, so just check each action's regex in sequence.

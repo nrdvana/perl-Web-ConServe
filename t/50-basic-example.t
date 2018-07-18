@@ -75,4 +75,41 @@ sub test_Example2 {
 	}
 }
 
+package CapturesAreParameters {
+	use Web::ConServe -parent;
+	sub foo : Serve('/object/:obj_id') {
+		my $self= shift;
+		return [200,[],[ 'foo', [@_], $self->params ]];
+	}
+	sub cap_mid : Serve('/object/*/subthing/:id') {
+		my $self= shift;
+		return [200,[],[ 'cap_mid', [@_], $self->params ]];
+	}
+}
+
+subtest CapturesAreParameters => \&test_CapturesAreParameters;
+sub test_CapturesAreParameters {
+	my $app_inst= new_ok( 'CapturesAreParameters', [] );
+	my $plack_app= $app_inst->to_app;
+	my @tests= (
+		[ '/object/1', 200, [1], { obj_id => 1 } ],
+		[ '/object/1/2', 404 ],
+		[ '/object/42/subthing', 404 ],
+		[ '/object/42/subthing/3', 200, [42, 3], { id => 3 } ],
+		[ '/object/42/subthing/', 404 ],
+		[ '/object//subthing/3', 404 ],
+		[ '/object/subthing/3', 404 ],
+	);
+	for (@tests) {
+		my ($path, $code, $args, $params)= @$_;
+		my $env= make_env(PATH_INFO => $path);
+		my $response= $plack_app->($env);
+		no warnings 'uninitialized';
+		is( $response->[0], $code, "path $path = $code" )
+		&& is_deeply( $response->[2][1], $args, "path $path args" )
+		&& is_deeply( $response->[2][2], $params, "path $path params" )
+			or diag explain $response;
+	}
+}
+
 done_testing;

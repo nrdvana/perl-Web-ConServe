@@ -31,9 +31,9 @@ has parameters         => ( is => 'lazy', clearer => 1 );
 sub _build_parameters {
 	my $self= shift;
 	Hash::MultiValue->new(
-		%{ $self->action->{captures_by_name} || {} },
-		@{ $self->_query_parameters },
-		@{ $self->_body_parameters }
+		(exists $self->action->{captures_by_name}? %{ $self->action->{captures_by_name} } : () ),
+		$self->query_parameters->flatten,
+		$self->body_parameters->flatten,
 	);
 }
 
