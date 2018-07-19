@@ -130,7 +130,7 @@ you came up with for the return values of your actions.
 
 You should consider the end of L</view> to be the last point when you can take
 any action.  If that isn't enough, L<PSGI> servers might implement the
-L</psgix.cleanup|PSGI::Extensions/SPECIFICATION> system for you to use.
+L<psgix.cleanup|PSGI::Extensions/SPECIFICATION> system for you to use.
 Failing that, you could return a PSGI streaming coderef which runs some code
 after the last chunk of data has been delivered to the client.
 

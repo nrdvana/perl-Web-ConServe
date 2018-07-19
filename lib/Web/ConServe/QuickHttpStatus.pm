@@ -1,4 +1,5 @@
 package Web::ConServe::QuickHttpStatus;
+
 use Moo;
 use Carp;
 require Plack::Response;
@@ -6,6 +7,31 @@ require JSON::MaybeXS;
 require HTTP::Status;
 require URI;
 use namespace::clean;
+
+# ABSTRACT: Response object for generic HTTP status messages
+
+=head1 DESCRIPTION
+
+This object provides a quick way to return an HTTP status code and also do a
+little bit of content negotiation so that it arrives at the user in a useful
+manner.
+
+=head1 CONSTRUCTOR
+
+=head2 new_shorthand
+
+  return Web::ConServe::QuickHttpStatus->new_shorthand( 404 => 'No such image' );
+  return Web::ConServe::QuickHttpStatus->new_shorthand( 302 => '../../list' );
+
+This method takes a status code, an optional string, and an optional hashref.
+The code determines how to interpret the string.  200, 400 and 500 messages use
+it as the content, and 300 errors use it as a Location header.
+
+=head2 new
+
+Standard Moo constructor
+
+=cut
 
 our $json_encoder; # lazy-built to JSON::MaybeXS, by default
 
@@ -37,6 +63,39 @@ sub BUILD {
 		$self->$_($args->{$_}) if defined $args->{$_};
 	}
 }
+
+=head1 ATTRIBUTES
+
+=head2 code
+
+HTTP status code (integer)
+
+=head2 message
+
+Plain text message to be delivered to user.  Can be converted to L</json> or
+L</body> if those are not supplied.  Defaults to the official status code
+message like "NOT FOUND" (from module L<HTTP::Status>)
+
+=head2 json
+
+Data (not encoded) to be delivered to user, if user accepts JSON.  Defaults to
+C<< { message => ..., success => ... } >>.
+
+=head2 body
+
+Content to use as body of request, overriding any other automatic conversions
+or guesses.
+
+=head2 plack_response
+
+A L<Plack::Response> object, where you can add headers or further override how
+the response will be rendered.
+
+=head2 headers, header, content_type, content_length, content_encoding, location, cookies
+
+These are all aliases to the same attribute of L<Plack::Response>.
+
+=cut
 
 has code    => ( is => 'rw', required => 1 );
 has message => ( is => 'rw' );
@@ -155,6 +214,16 @@ sub _render_body {
 		return [ $self->message // HTTP::Status::status_message($self->code) ];
 	}
 }
+
+=head1 METHODS
+
+=head2 to_app
+
+This allows this object to act like a Plack application.  This gives it access
+to the request while being rendered, so that it can do things like
+intelligently resolve the relative location URLs and inspect the Accept header.
+
+=cut
 
 sub to_app {
 	my $self= shift;

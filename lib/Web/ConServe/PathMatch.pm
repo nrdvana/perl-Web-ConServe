@@ -2,6 +2,8 @@ package Web::ConServe::PathMatch;
 
 use Moo;
 
+# ABSTRACT: Default implementation of path matching for Web::ConServe
+
 =head1 DESCRIPTION
 
 This is the default path-matching implementation for Web::ConServe.
