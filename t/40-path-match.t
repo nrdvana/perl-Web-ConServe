@@ -103,7 +103,6 @@ sub test_wildcard_nuances {
 			{ %{$actions[3]}, captures => ['1/x/2/1/2/3/y'] },
 		],
 		[ '/bar/t' =>
-			{ %{$actions[6]}, captures => [ '', '' ] },
 			{ %{$actions[3]}, captures => [ 't' ] },
 		],
 		[ '/bar/42/d/'   => { %{$actions[3]}, captures => ['42/d/'] } ],

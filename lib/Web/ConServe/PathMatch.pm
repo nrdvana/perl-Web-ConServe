@@ -9,11 +9,10 @@ It handles the task of taking a set of path-patterns and efficiently
 matching them against an incoming path.
 
 The path patterns are "shell glob style with an rsync twist".  In short,
-C<'*'> matches any string that doesn't contain a path separator, and C<**>
-matches any string including path separators.  As a special case, C<*>
-bounded by path separators must match at least one character, and C<**>
-bounded by path separators (or end of string) may match negative-one
-characters (in other words, C<'/**/'> may match C<'/'>).
+C<'*'> captures a non-empty string that doesn't contain a path separator,
+and C<**> matches any string including path separators.  As a special case,
+if C<**> is bounded by path separators (or end of string) it may match
+negative-one characters (in other words, C<'/**/'> may match C<'/'>).
 
 =head1 ATTRIBUTES
 
@@ -104,10 +103,8 @@ sub _build_tree {
 					
 					# \Q\E add escapes to "/", which is inconvenient below, so gets handled specifically here
 					my @parts= ( '**', split m{ ( \*\*? | / ) }x, $suffix );
-					my $regex_text= '^'.join('', map { $_ eq '/'? '/' : $_ eq '*'? '([^/]*)' : $_ eq '**'? '(.*?)' : "\Q$_\E" } @parts).'$';
+					my $regex_text= '^'.join('', map { $_ eq '/'? '/' : $_ eq '*'? '([^/]+)' : $_ eq '**'? '(.*?)' : "\Q$_\E" } @parts).'$';
 					# WHEE!  Processing regular expressions with regular expressions!
-					# "/*" needs to match at least one character
-					$regex_text =~ s, / \( \[ \^ / \] \* \) ,/([^/]+),xg;
 					# "/**/" needs to match "/" and "/**" needs to match ""
 					$regex_text =~ s, / \( \. \* \? \) ( / | \$ ) ,(?|/(.*?)|())$1,xg;
 					# If prefix ends with '/', then "**/" can also match ""
