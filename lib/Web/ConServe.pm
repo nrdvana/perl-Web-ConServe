@@ -13,6 +13,24 @@ use namespace::clean;
 
 # ABSTRACT: Conrad's conservative web service framework
 
+=head1 DESCRIPTION
+
+This little "framework" is the result of many little observations I've made
+over the years of using of other web frameworks.  In a language that advertises
+There Is More Than One Way To Do It, web frameworks tend to make an awful lot
+of decisions for you, including a lot of small "bikeshed" details, and end up
+with a large learning curve.
+Two notable exceptions are Plack and Web::Simple, and while I appreciate their
+minimalism, after testing them on some real-world projects I find them
+lacking in convenience for common problems.
+
+The purpose of Web::ConServe is to provide a minimalist but convenient and
+highly flexible base class for writing Plack apps.  It aims to be a sensible
+starting point for small or large projects rather than a pre-made one-stop
+solution.  The L</APPLICATION LIFECYCLE> section tell you pretty much
+everything you need to know about the design, but I also included my rationale
+for the design in the L</DESIGN GOALS> section.
+
 =head1 SYNOPSIS
 
   package MyWebapp;
@@ -21,7 +39,7 @@ use namespace::clean;
   with 'My::Moo::Role';           # Fully Moo compatible
   
   # Actions are declared with method attributes like Catalyst,
-  # but using a path syntax like Web::Simple
+  # but using a path syntax like Dancer or Web::Simple
   # but the application object is a lot more like CGI::Application.
   # Request and Response are Plack-style.
   # You can return Plack arrayref notation, or use sugar methods
@@ -43,31 +61,23 @@ use namespace::clean;
   has user_object => ( is => 'lazy' );
   sub _build_user_object {
     my $self= shift;
+    # 'db' and 'session' are attributes you define yourself, or via plugins
     $self->db->resultset('User')->find($self->session->{userid});
   }
   
-  # You can match on details of the request
-  
-  sub user_add : Serve( /users/add POST wants_json we_like_them ) { ... }
-  
-  # and it's fully customizable
+  # You can match on user-defined details of the request.
+  # Just set flags on the incoming request, then match them in the action.
   
   sub BUILD {
     my $self= shift;
     if ($self->req) {
         my $flags= $self->req->flags;
-        $flags->{wants_json}= $self->req->header('Accept') =~ /application\/json/;
+        $flags->{wants_json}= $self->req->header('Accept') =~ /application\/json/i;
         $flags->{we_like_them}= $self->req->address =~ /^10\./;
-        # you can subclass the request object for prettier code.
     }
   }
-
-=head1 DESCRIPTION
-
-The purpose of ConServe is to provide a minimalist (but still convenient)
-base class for writing Plack apps.  To read about why and how, see the
-L</DESIGN GOALS> section.  If you want to know how to accomplish common tasks,
-see the L<Cookbook|Web::ConServe::Cookbook> page.
+  
+  sub user_add : Serve( /users/add POST wants_json we_like_them ) { ... }
 
 =head1 APPLICATION LIFECYCLE
 
@@ -958,6 +968,70 @@ Everyone and their cat has a favorite logging system, and even the one for PSGI
 is an optional extension.  So let logging be done with an optional Plugin.
 
 =back
+
+=head1 SEE ALSO
+
+=over
+
+=item L<PSGI> / L<Plack>
+
+Interface specification and tools to make web apps and web servers more inter-
+operable.
+
+=item L<Plack::Builder>
+
+Module for defining an app as a composition of other apps "mounted" at paths.
+Based on manually-written objects.
+
+Great for combining smaller apps, but not something you'd want to build a
+large-scale app with.
+
+=item L<Catalyst>
+
+Full-featured web service framework with emphasis on MVC structure and methods
+that get automatically invoked in sequence. Moose-based.  Supports and now
+heavily based on Plack.
+
+Downsides: lots of dependencies, and makes OO programming awkward with separate
+controller and context variables that need passed around everywhere.
+Also has a big learning curve.
+
+=item L<Dancer>
+
+Full-featured web service framework with emphasis on minimal syntax.  Dancer2
+is Moo-based, and Plack compatible.
+
+Downsides: everything is global (which if I'm not mistaken, makes parallel
+event-driven requests impossible), and most of the implementation is hidden,
+making it hard to change the details of its behavior without a big learning
+curve.  Also heavy on dependencies.
+
+=item L<Mojolicious>
+
+Full-featured web service framework with emphasis on event-driven style,
+and having a complete copy of CPAN within it's own namespace.  Based on its
+own object system.  C<Not> Plack-compatible.
+
+The complete copy of CPAN is very well written, but requires you to learn a
+new API for everything you already knew, and which you can't use for other
+purposes without depending on the whole of Mojo.
+
+=item L<Web::Simple>
+
+Extremely minimal framework that routes requests to coderefs which can return
+further dispatch routing paths.
+
+Downsides: The closures-within-closures-within-closures don't lead to clean
+code.  If you avoid closures, then it suffers from the Catalyst problem of
+needing a pair of objects everywhere.
+
+=item L<CGI::Application>
+
+Old and simple-ish framework with "controller object holds refs to everything"
+pattern that I like, but which is otherwise behind the times on programming
+and web trends.
+
+=cut
 
 =cut
 
