@@ -62,6 +62,7 @@ sub path_with_capture {
 subtest wildcard_nuances => \&test_wildcard_nuances;
 sub test_wildcard_nuances {
 	my @actions= (
+		{ path => '/foo/*.*' },
 		{ path => '/foo/*' },
 		{ path => '/foo/**/json' },
 		{ path => '/foo/**/*' },
@@ -76,41 +77,46 @@ sub test_wildcard_nuances {
 		[ '/'            => () ],
 		[ '/foo'         => () ],
 		[ '/foo/3'       => 
-			{ %{$actions[0]}, captures => [3] },
-			{ %{$actions[2]}, captures => ['',3] },
+			{ %{$actions[1]}, captures => [3] },
+			{ %{$actions[3]}, captures => ['',3] },
 		],
 		[ '/foo/3/'      => () ],
 		[ '/foo/3//'     => () ],
-		[ '/foo/3/xyz'   => { %{$actions[2]}, captures => [3,'xyz'] } ],
+		[ '/foo/3/xyz'   => { %{$actions[3]}, captures => [3,'xyz'] } ],
 		[ '/foo/3/json'  =>
-			{ %{$actions[1]}, captures => [3] },
-			{ %{$actions[2]}, captures => [3,'json'] }
+			{ %{$actions[2]}, captures => [3] },
+			{ %{$actions[3]}, captures => [3,'json'] }
 		],
-		[ '/bar'         => { %{$actions[3]}, captures => [''] } ],
-		[ '/bar/'        => { %{$actions[3]}, captures => [''] } ],
-		[ '/bar/z'       => { %{$actions[3]}, captures => ['z'] } ],
-		[ '/bar/z/'      => { %{$actions[3]}, captures => ['z/'] } ],
+		[ '/foo/index.html' =>
+			{ %{$actions[0]}, captures => ['index','html'] },
+			{ %{$actions[1]}, captures => ['index.html'] },
+			{ %{$actions[3]}, captures => ['', 'index.html'] },
+		],
+		[ '/bar'         => { %{$actions[4]}, captures => [''] } ],
+		[ '/bar/'        => { %{$actions[4]}, captures => [''] } ],
+		[ '/bar/z'       => { %{$actions[4]}, captures => ['z'] } ],
+		[ '/bar/z/'      => { %{$actions[4]}, captures => ['z/'] } ],
 		[ '/bar/1/x/2/y' =>
-			{ %{$actions[4]}, captures => [1,2] },
-			{ %{$actions[3]}, captures => ['1/x/2/y'] },
+			{ %{$actions[5]}, captures => [1,2] },
+			{ %{$actions[4]}, captures => ['1/x/2/y'] },
 		],
 		[ '/bar/1/a/x/2/y' =>
-			{ %{$actions[4]}, captures => ['1/a',2] },
-			{ %{$actions[3]}, captures => ['1/a/x/2/y'] },
+			{ %{$actions[5]}, captures => ['1/a',2] },
+			{ %{$actions[4]}, captures => ['1/a/x/2/y'] },
 		],
 		[ '/bar/1/x/2/1/2/3/y' =>
-			{ %{$actions[4]}, captures => [1,'2/1/2/3'] },
-			{ %{$actions[3]}, captures => ['1/x/2/1/2/3/y'] },
+			{ %{$actions[5]}, captures => [1,'2/1/2/3'] },
+			{ %{$actions[4]}, captures => ['1/x/2/1/2/3/y'] },
 		],
 		[ '/bar/t' =>
-			{ %{$actions[3]}, captures => [ 't' ] },
+			{ %{$actions[4]}, captures => [ 't' ] },
 		],
-		[ '/bar/42/d/'   => { %{$actions[3]}, captures => ['42/d/'] } ],
-		[ '/bar/d'       => { %{$actions[3]}, captures => ['d'] } ],
-		[ '/bar/d/'      => { %{$actions[3]}, captures => ['d/'] } ],
+		[ '/bar/42/d/'   => { %{$actions[4]}, captures => ['42/d/'] } ],
+		[ '/bar/d'       => { %{$actions[4]}, captures => ['d'] } ],
+		[ '/bar/d/'      => { %{$actions[4]}, captures => ['d/'] } ],
 		[ '/bar/d/2'     =>
-			{ %{$actions[5]}, captures => ['',2] },
-			{ %{$actions[3]}, captures => ['d/2'] },
+			{ %{$actions[6]}, captures => ['',2] },
+			{ %{$actions[4]}, captures => ['d/2'] },
 		],
 	);
 	for (@tests) {
