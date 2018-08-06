@@ -219,6 +219,8 @@ sub _make_subpath_regexes {
 			$pat_item->[NODE_PATTERN_REGEX]= qr/$re_text/;
 		}
 	}
+	# no longer needed.
+	delete $node->[NODE_PATTERNS_SET];
 }
 
 # 1.  Check full path vs. hash of constants.  If exists, iterate each action.
@@ -247,13 +249,14 @@ sub _search_tree {
 			# If the option has sub-paths, then descend into one of those
 			if ($pat->[NODE_PATTERN_SUBNODES]) {
 				my $prefix= pop @cap;
+				my $from_pos= $-[-1];
 				# The regex captures the longest prefix, but there might be shorter prefixes
 				# that yield a match.  The prefixes are recorded as ->[NODE_BACKTRACK], so
 				# loop through them like a linked list.
 				while (defined $prefix) {
 					my $subnode= $pat->[NODE_PATTERN_SUBNODES]{$prefix}
 						or die "BUG: invalid path tree (no '$prefix' subtree when '$path' matches ".$pat->[NODE_PATTERN_REGEX].")";
-					my $remainder= substr($path, $-[-1]+length($prefix));
+					my $remainder= substr($path, $from_pos+length($prefix));
 					$DEBUG->((@cap? "captured ".join('', map "'$_' ", @cap).", " : '')."descend into '$prefix'") if $DEBUG;
 					$self->_search_tree($subnode, $remainder, $callback, [ @$captures, @cap ]) && return 1;
 					

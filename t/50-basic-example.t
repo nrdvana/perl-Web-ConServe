@@ -54,7 +54,7 @@ package Example2 {
 
 subtest Example2 => \&test_Example2;
 sub test_Example2 {
-	#local $Web::ConServe::DEBUG_FIND_ACTIONS= sub { warn "$_[0]\n" };
+	#local $Web::ConServe::PathMatch::DEBUG= \&diag;
 	my $app_inst= new_ok( 'Example2', [] );
 	my $plack_app= $app_inst->to_app;
 
