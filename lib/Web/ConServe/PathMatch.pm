@@ -1,7 +1,6 @@
 package Web::ConServe::PathMatch;
-use DDP { use_prototypes => 0 };
+
 use Moo;
-use Data::Dumper;
 our $DEBUG; #= sub { warn @_; };
 
 # ABSTRACT: Default implementation of path matching for Web::ConServe
@@ -17,6 +16,49 @@ C<'*'> captures a non-empty string that doesn't contain a path separator,
 and C<**> matches any string including path separators.  As a special case,
 if C<**> is bounded by path separators (or end of string) it may match
 negative-one characters (in other words, C<'/**/'> may match C<'/'>).
+The single-star capture may occur more than once in a single path part, such
+as C</foo*bar*/>.
+
+=head1 MATCH PRIORITY
+
+Pattern matching gives priority to
+
+=over
+
+=item 1
+
+Longest matching prefix / literal matches
+
+    /foo/bar/baz
+
+=item 2
+
+Single-star captures followed by extra pattern before '/'
+
+    /foo/b*r/baz
+
+=item 3
+
+Single-star captures
+
+    /foo/b*/baz
+
+=item 4
+
+Double-star captures followed by extra pattern
+
+    /foo/b**/baz
+
+=item 5
+
+Double-star captures
+
+    /foo/b**
+
+=back
+
+and all ties are resolved by which rule came first.  Duplicate paths are allowed, and will be
+iterated in order given.
 
 =head1 ATTRIBUTES
 
@@ -27,9 +69,9 @@ field C<'path'>.
 
 =head2 tree
 
-The internal search tree (trie, really) for efficient matching.  You don't
-need to see this, but it might help with debugging.  The tree is generated
-during construction.
+The internal search tree (more like a trie, really) for efficient matching.
+You don't need to see this, but it might help with debugging.  The tree is
+generated during the constructor, so you get immediate feedback about errors.
 
 =cut
 
@@ -51,12 +93,11 @@ sub BUILD { shift->tree }
 Find the node whose path pattern matches C<$path>.  C<$captures> is an
 arrayref of the portions of the string that matched the wildcards.
 
-Because multiple patterns might match, the callback should return 1 if it is
-done, and 0 if it wants to see the next match.  The sequence of nodes passed
-to the callback will always give the longest prefix match first, and favor
-literal matches over wildcard matches.
+Because multiple patterns might match, the callback should return true if it
+is done, and false if it wants to see the next match.  The sequence of nodes
+passed to the callback is given by L</MATCH PRIORITY> listed above.
 
-The search function returns true if the callback returns true at any point,
+The search method returns true if the callback returns true at any point,
 and false otherwise.
 
 =cut
@@ -148,10 +189,9 @@ sub _build_tree {
 			}
 		}
 	}
-	# For each ->{...}{cap} node, make a {cap_regex} to find the longest prefix
-	$DEBUG->("before regexes, tree is:".Data::Dumper::Dumper($root)) if $DEBUG;
+	$DEBUG->("before regexes, tree is:", $root) if $DEBUG;
 	$self->_make_subpath_regexes($root);
-	$DEBUG->("after regexes, tree is:".Data::Dumper::Dumper($root)) if $DEBUG;
+	$DEBUG->("after regexes, tree is:", $root) if $DEBUG;
 	return $root;
 }
 
@@ -222,13 +262,6 @@ sub _make_subpath_regexes {
 	# no longer needed.
 	delete $node->[NODE_PATTERNS_SET];
 }
-
-# 1.  Check full path vs. hash of constants.  If exists, iterate each action.
-# 2.  For each other option in node:
-# 2.1   Compare regex of option vs. path.  If matches:
-# 2.1.1    If option has a hashref, pop one element from the captures and descend into sub-node.
-# 2.1.2    Upon return, use "backtrack" (if any) to descend into a different sub-node.
-# 2.1.2    Else, iterate actions in remaining elements of arraay
 
 sub _search_tree {
 	my ($self, $node, $path, $callback, $captures)= @_;

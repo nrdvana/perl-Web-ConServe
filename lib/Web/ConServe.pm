@@ -13,25 +13,51 @@ use namespace::clean;
 
 # ABSTRACT: Conrad's conservative web service framework
 
+=head1 SYNOPSIS
+
+  package MyWebapp;
+  use Web::ConServe -parent, -plugin => 'Res';
+  
+  has things => ( is => 'rw', required => 1 );
+  
+  sub list_things :Serve( GET /thing/ ) {
+    my $self= shift;
+    return res_json($self->things);
+  }
+  sub create_thing :Serve( POST /thing/ ) {
+    my $self= shift;
+    push @{ $self->things }, { name => $self->param('name') };
+    return res_redirect('/thing/'.$#{$self->things});
+  }
+  sub get_thing :Serve( GET /thing/:id ) {
+    my ($self, $id)= @_;
+    $id >= 0 && $id < @{$self->things}
+      or return res_notfound;
+    return res_json($self->things->[$id]);
+  }
+
+  require MyWebapp;
+  MyWebapp->new(things => [])->to_app;
+
 =head1 DESCRIPTION
 
-This little "framework" is the result of many little observations I've made
-over the years of using of other web frameworks.  In a language that advertises
-There Is More Than One Way To Do It, web frameworks tend to make an awful lot
-of decisions for you, including a lot of small "bikeshed" details, and end up
-with a large learning curve.
-Two notable exceptions are Plack and Web::Simple, and while I appreciate their
-minimalism, after testing them on some real-world projects I find them
+This little framework is the result of many observations I've made over the
+years of using of other web frameworks.  In a language that advertises There
+Is More Than One Way To Do It, the main web frameworks tend to make an awful
+lot of decisions for you, including a lot of small "bikeshed" details, and
+end up with a large learning curve.
+Two notable exceptions are L<Plack> and L<Web::Simple>.  While I appreciate
+their minimalism, after testing them on some real-world projects I find them
 lacking in convenience for common problems.
 
 The purpose of Web::ConServe is to provide a minimalist but convenient and
 highly flexible base class for writing Plack apps.  It aims to be a sensible
 starting point for small or large projects rather than a pre-made one-stop
-solution.  The L</APPLICATION LIFECYCLE> section tell you pretty much
-everything you need to know about the design, but I also included my rationale
-for the design in the L</DESIGN GOALS> section.
+solution.  The L</APPLICATION LIFECYCLE> section tells you pretty much all
+you need to know about the design, and if you're already familiar with Plack
+then the learning curve should be pretty small.
 
-=head1 SYNOPSIS
+=head1 NOTABLE FEATURES
 
   package MyWebapp;
   use Web::ConServe -parent,      # Automatically set up Moo and base class
@@ -77,7 +103,7 @@ for the design in the L</DESIGN GOALS> section.
     }
   }
   
-  sub user_add : Serve( /users/add POST wants_json we_like_them ) { ... }
+  sub user_add : Serve( POST /users/add wants_json we_like_them ) { ... }
 
 =head1 APPLICATION LIFECYCLE
 
@@ -119,14 +145,14 @@ Next the plack app calls L</dispatch>.  This looks for the best matching
 action for the request, then if found, calls that method.  The return value
 from the method becomes the response, after pos-processing (described next).
 
-If there was not a matching rule, then the dispatcher sets the response code
+If there was not a matching rule, then L</dispatch> sets the response code
 as appropriate: 404 for no path match, 405 for no method match, and 422 for
 a match that didn't meet custom user conditions.
 
-If the method throws an exception, the default is to let it bubble up the
-Plack chain so that you can use Plack middleware to deal with it.  If you want
-to trap exceptions, see the role L<Web::ConServe::Plugin::CatchAs500>, or
-wrap L</dispatch> with your preferred exception handling.
+If the action method throws an exception, the default is to let it bubble up
+the Plack chain so that you can use Plack middleware to deal with it. If you
+want to trap exceptions, see the role L<Web::ConServe::Plugin::CatchAs500>,
+or wrap L</dispatch> with your preferred exception handling.
 
 =item View / Post-processing
 
@@ -161,8 +187,7 @@ is equivalent to
 Note that this allows plugins to change the class/role hierarchy as well as
 inject symbols into the current package namespace, such as 'sugar' methods.
 The roles or parent classes you add here happen at BEGIN-time, saving you
-some typing and cleaning up your code.  Plugins are assumed to belong to the
-Web::ConServe::Plugin namespace, but roles are not.
+some typing and cleaning up your code.
 
 =over
 
@@ -174,9 +199,10 @@ as the parent class.
 =item -plugins
 
 Declares that all following arguments (until the next option flag) are Plugin
-package suffixes to the namespace L<Web::ConServe::Plugin>.  Each will be
-invoked in a C<BEGIN> block with the option C<-plug> which may have wide-
-ranging effects, as documented in the plugin.
+names, which by default are suffixes to the namespace L<Web::ConServe::Plugin>.
+You can specify an absolute package name by prefixing it with C<+>.
+Each will be invoked in a C<BEGIN> block with the option C<-plug> which may
+have wide-ranging effects, as documented in the plugin.
 
 =item -extends
 
@@ -203,7 +229,10 @@ sub import {
 		}
 		elsif ($args[0] eq '-plugins') {
 			shift @args;
-			while (@args && $args[0] !~ /^-/) { push @plug, shift @args; }
+			while (@args && $args[0] !~ /^-/) {
+				my $name= shift @args;
+				push @plug, ($name =~ /^\+/? substr($name,1) : 'Web::ConServe::Plugin::'.$name);
+			}
 		}
 		elsif ($args[0] eq '-with') {
 			shift @args;
@@ -219,13 +248,8 @@ sub import {
 	}
 	eval 'package '.$caller.'; use Moo; extends "Web::ConServe"; 1' or croak $@
 		if $add_moo;
-	if (@plug) {
-		for (@plug) {
-			$_= "Web::ConServe::Plugin::$_";
-			Module::Runtime::is_module_name($_) or croak "Invalid plugin name '$_'";
-		}
-		eval join(';', 'package '.$caller, (map "use $_ '-plug';", @plug), 1) or croak $@;
-	}
+	eval join(';', 'package '.$caller, (map "use $_ '-plug'", @plug), 1) or croak $@
+		if @plug;
 	eval 'package '.$caller.'; extends @extend; 1' or croak $@
 		if @extend;
 	eval 'package '.$caller.'; with @with; 1' or croak $@
@@ -294,13 +318,14 @@ was cloned from, and also have L</request> set.
 
 =head2 request_class
 
-The request class that will be used by default.  Setting this might be better
-than overriding L</accept_request> if you prefer to use lazy attributes on the
-request object instead of doing all the processing up-front.
+The class to use for incoming requests.  The class must take a Plack C<$env> as
+a constructor parameter.  Setting this to a custom class allows you to use lazy
+attributes on the request object rather than overriding L</accept_request> and
+doing all the processing up-front.
 
 =head2 request
 
-  $self->req->params->get('x');  # alias 'req' is faster
+  $self->req->params->get('x');  # alias 'req' is preferred
 
 The request object.  The C<request> (and C<req>) accessor is read-only,
 because the request should never change from what was delivered to the
@@ -343,74 +368,11 @@ sub params  { shift->req->parameters }
 
 Standard Moo constructor.
 
-=head2 clone
+=head2 to_app
 
-Like C<new>, but inherit all existing attributes of the current instance.
-This creates a B<shallow clone>.  Override this if you need to avoid sharing
-certain resources between instances.  You might also want to deep-clone
-critical attributes to make sure they don't get altered during a request,
-or better (on newer Perls) mark them readonly with L<Const::Fast>.
-
-=head2 accept_request
-
-  my $new_instance= $app->accept_request( $plack_env );
-
-Clone the application and initialize the L</request> attribute from the Plack
-environment.  The default implementation creates a request from
-L</request_class> and then calls L</clone>.
-
-=head2 find_actions
-
-  my (@actions_data)= $app->find_actions( $request );
-
-Return a list of hashrefs, one for each action which had a full path-match
-against the request.  The search stops at the first complete match, so the
-search was successful if and only if C<< !defined $actions_data[0]{mismatch} >>.
-Other actions whose path matched but failed the C<match_fn> (like HTTP Method,
-flags, etc) will follow in the list, for debugging purposes and to be able to
-return the correct HTTP status code.
-
-Each hashref is a shallow clone of the action, and may have additional fields
-describing the result of the match operation.
-
-If you're having trouble with the pattern matching or captures, you can set
-
-  local $Web::ConServe::DEBUG_FIND_ACTIONS= sub { warn "$_[0]\n" };
-
-to get some diagnostics.
-
-=head2 dispatch
-
-  my $something= $app->dispatch; # using app->req
-
-Dispatch a request to an action method, and return the application-specific
-result.  If no action matches, it returns an appropriate plack response of an
-HTTP error code.
-
-You might choose to wrap this with exception handling, to catch errors from
-the controller actions.
-
-=head2 dispatch_fail_response
-
-This analyzes C<< ->req->action_rejects >> to come up with an appropriate HTTP
-status code, returned as a plack response arrayref.  It is called internally by
-L</dispatch> if there wasn't a matching action.  It is a separate method to
-enable easy subclassing or re-use.
-
-=head2 view
-
-  my $plack_result= $app->view( $something );
-
-Convert an application-specific result into a Plack response arrayref.
-By default, this checks for objects which are not arrayrefs and have method
-C<to_app>, and then runs them as a plack app with a modified PATH_INFO
-and SCRIPT_NAME according to which acton got dispatched.  Note that this also
-handles L<Plack::Response> objects.
-
-You may customize this however you like, and plugins are likely to wrap it
-with method modifiers as well.  Keep in mind though that the best performance
-is achieved with custom behavior on the objects you return, rather than lots
-of "if" checks after the fact.
+Returns a Plack coderef that calls L</call>.   You might choose to override
+this to combine plack middleware with your app, so that the callers don't
+need to deal with those details.
 
 =head2 call
 
@@ -423,13 +385,45 @@ environment, then L</dispatch> to create an intermediate response, and then
 L</view> to render that response as a proper Plack response.  You might
 choose to wrap this with exception handling to trap errors from views.
 
-=head2 to_app
+=cut
 
-Returns a Plack coderef that calls L</call>.   You might choose to override
-this to combine plack middleware with your app, so that the callers don't
-need to deal with those details.
+sub to_app {
+	my $self= shift;
+	sub { $self->call(shift) };
+}
+
+sub call {
+	my ($self, $env)= @_;
+	# Make sure actions_cache is initialized
+	$self->actions_cache;
+	my $inst= $self->accept_request($env);
+	$inst->view($inst->dispatch());
+}
+
+=head2 accept_request
+
+  my $new_instance= $app->accept_request( $plack_env );
+
+Clone the application and initialize the L</request> attribute from the Plack
+environment.  The default implementation creates a request from
+L</request_class> and then calls L</clone>.
+
+=head2 clone
+
+Like C<new>, but inherit all existing attributes of the current instance.
+This creates a B<shallow clone>.  Override this if you need to avoid sharing
+certain resources between instances.  You might also want to deep-clone
+critical attributes to make sure they don't get altered during a request,
+or better (on newer Perls) mark them readonly with L<Const::Fast>.
 
 =cut
+
+sub accept_request {
+	my ($self, $plack_env)= @_;
+	$self->actions_cache; # Make sure lazy-initialized before clone
+	my $req= $self->request_class->new($plack_env);
+	$self->clone(app_instance => $self, request => $req);
+}
 
 sub clone {
 	my $self= shift;
@@ -442,12 +436,65 @@ sub clone {
 	);
 }
 
-sub accept_request {
-	my ($self, $plack_env)= @_;
-	$self->actions_cache; # Make sure lazy-initialized before clone
-	my $req= $self->request_class->new($plack_env);
-	$self->clone(app_instance => $self, request => $req);
-}
+=head2 dispatch
+
+  my $something= $app->dispatch; # using app->req
+
+Dispatch a request to an action method, and return the application-specific
+result.  If no action matches, it returns an appropriate plack response of an
+HTTP error code.  This method populates C<< req->action >> and
+C<< req->action_rejects >>.
+
+You might choose to wrap this with exception handling, to catch errors from
+the controller actions.
+
+=head2 find_actions
+
+  my (@actions_data)= $app->find_actions( $request );
+
+Return a list of hashrefs, each one an expanded copy of an action whose path
+matched.  The following official fields can be added, in addition to anything
+the match function returns.
+
+=over
+
+=item path_match
+
+The portion of the path which matched the action's pattern not including a
+final C<**> pattern.  This assists with setting up nested controllers.
+
+=item captures
+
+The arrayref of captures strings for the wildcards in the pattern.
+
+=item capture_by_name
+
+If any captures were named, this is a hashref of C<< name => $value >>.
+
+=item mismatch
+
+If the action failed to match, this is the reason.
+
+=back
+
+The action data are returned in the reverse order they were tested,
+and the search stops at the first complete match, so the search was
+successful if and only if C<< !defined $actions_data[0]{mismatch} >>.
+Other actions whose path matched but failed the C<match_fn> (like HTTP Method,
+flags, etc) will follow in the list, for debugging purposes and to be able to
+return the correct HTTP status code.
+
+See L<Web::ConServe::PathMatch> for details on which matches take priority,
+and notes on debugging.
+
+=head2 dispatch_fail_response
+
+This analyzes C<< ->req->action_rejects >> to come up with an appropriate HTTP
+status code, returned as a plack response arrayref.  It is called internally by
+L</dispatch> if there wasn't a matching action.  It is a separate method to
+enable easy subclassing or re-use.
+
+=cut
 
 sub _conserve_find_actions;
 *find_actions= *_conserve_find_actions;
@@ -483,6 +530,23 @@ sub dispatch_fail_response {
 	return [$not_method_problem[0]{http_status}//422, [], []];
 }
 
+=head2 view
+
+  my $plack_result= $app->view( $something );
+
+Convert an application-specific result into a Plack response arrayref.
+By default, this checks for objects which are not arrayrefs and have method
+C<to_app>, and then runs them as a plack app with a modified C<PATH_INFO>
+and C<SCRIPT_NAME> according to which acton got dispatched.  Note that this
+also handles L<Plack::Response> objects.
+
+You may customize this however you like, and plugins are likely to wrap it
+with method modifiers as well.  Keep in mind though that the best performance
+is achieved with custom behavior on the objects you return, rather than lots
+of "if" checks after the fact.
+
+=cut
+
 sub view {
 	my ($self, $result)= @_;
 	if (ref($result) ne 'ARRAY' && ref($result)->can('to_app')) {
@@ -501,26 +565,13 @@ sub view {
 	return $result;
 }
 
-sub call {
-	my ($self, $env)= @_;
-	my $inst= $self->accept_request($env);
-	$inst->view($inst->dispatch());
-}
-
-sub to_app {
-	my $self= shift;
-	# Make sure actions_cache is initialized
-	$self->actions_cache;
-	sub { $self->call(shift) };
-}
-
 =head1 IMPLEMENTATION DETAILS
 
 =head2 conserve_actions_for_class
 
   my $array= Web::ConServe->conserve_actions_for_class($class, %opts);
 
-Return the arrayrefs of actions defined on the classes.
+Return an arrayref of actions defined on the classes.
 
 Options:
 
@@ -584,7 +635,7 @@ sub conserve_register_action {
 
 =cut
 
-sub FLAG_TRUE { \1 }
+use constant FLAG_TRUE => \1;
 sub conserve_parse_action {
 	my ($class, $text, $err_ref)= @_;
 	my %action;
@@ -688,11 +739,9 @@ sub MODIFY_CODE_ATTRIBUTES {
 	return $super? $super->($class, $coderef, @unknown) : @unknown;
 }
 
-our $DEBUG_FIND_ACTIONS;
 sub _conserve_find_actions {
 	my ($self, $req)= @_;
 	$req //= $self->req;
-	local $Web::ConServe::PathMatch::DEBUG= $DEBUG_FIND_ACTIONS if $DEBUG_FIND_ACTIONS;
 	my @result;
 	$self->actions_cache->search($req->env->{PATH_INFO}, sub {
 		my ($action, $captures)= @_;
@@ -781,28 +830,22 @@ An action has the following pre-defined fields:
     handler => sub { ... },             # code to execute when dispatching
     match_fn => sub { ... }             # test whether action matches request
     methods => { $METHOD => 1, ... },   # set of allowed HTTP methods
-    flags => { $flag1 => $value1, ... } # set of required flags
+    flags => { $flag1 => $value1, ... } # set of required user-defined flags
   }
 
 =over
 
 =item path
 
-The path must always start with '/'.  A single star character indicates that a
-portion of the URL should be captured up to the next '/'.  For instance,
-C<'/user*/foo'> can capture the user ID from the URL C<"/user12345/foo">.
-If you add a double star at the end of the path, it means that the remainder
-of the URL should be captured, but not considered "consumed".  This helps with
-dispatching to a sub-controller.  You may also use a double star within the
-middle of a path, but this is less efficient and not recommended.  As a special
-case, C<'/**'> may match an empty string, and C<'/**/'> may match C<'/'>.
+The path must always start with '/', and must have all its named captures
+replaced with C<*> or C<**>.  See <Web::ConServe::PathMatch> for details
+about patterns and priorities.
 
 =item capture_names
 
-In the C<Serve(...)> code-attributes, you can use C<':name'> to indicate a
-named capture.  That isn't valid in the internal path spec, and what you do
-instead is list one name for each wildard in the path.  Use a name of C<''>
-for un-named captures.
+In the C<Serve(...)> code-attributes, paths may contain C<':name'> to indicate
+a named capture.  That isn't valid for the C<path> spec, so those names are
+moved to this array after parsing.  Use a name of C<''> for un-named captures.
 
 =item handler
 
