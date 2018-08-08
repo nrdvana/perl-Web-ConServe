@@ -72,7 +72,8 @@ aliases:
 for (map HTTP::Status->$_, grep /^HTTP_/, @HTTP::Status::EXPORT_OK) {
 	no strict 'refs';
 	my $code= $_;
-	*{push @EXPORT_OK, "http$_"}= sub { Web::ConServe::QuickHttpStatus->new_shorthand($code, @_) };
+	push @EXPORT_OK, "http$_";
+	*{"http$_"}= sub { Web::ConServe::QuickHttpStatus->new_shorthand($code, @_) };
 }
 
 =item res_redirect

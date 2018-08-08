@@ -16,7 +16,7 @@ use namespace::clean;
 =head1 SYNOPSIS
 
   package MyWebapp;
-  use Web::ConServe -parent, -plugin => 'Res';
+  use Web::ConServe -parent, -plugins => 'Res';
   
   has things => ( is => 'rw', required => 1 );
   
@@ -550,12 +550,10 @@ of "if" checks after the fact.
 sub view {
 	my ($self, $result)= @_;
 	if (ref($result) ne 'ARRAY' && ref($result)->can('to_app')) {
-		# save a step for Plack::Response
+		# Save a step for Plack::Response
 		return $result->finalize if $result->can('finalize');
-		# Else execute a sub-app
-		my $sub_app= $result->to_app;
-		my $env= $self->req->action_inner_env;
-		$sub_app->($env);
+		# Else execute another app
+		return $result->to_app->($self->req->env);
 	}
 	elsif (@$result == 3 && $result->[0] >= 400 && @{$result->[2]} == 0) {
 		# If response is a plain HTTP status error, and has no content,
@@ -644,7 +642,7 @@ sub conserve_parse_action {
 		# TODO: add warnings about mistaken quoted string behavior
 		$text= $2;
 	}
-	for my $part (split / +/, $text) {
+	for my $part (grep length, split / +/, $text) {
 		if ($part =~ m,^/,) {
 			if (defined $action{path}) {
 				$$err_ref= 'Multiple paths defined' if $err_ref;

@@ -110,9 +110,9 @@ sub _build_action_inner_env {
 	my $env= $self->env;
 	# Sanity checks
 	$self->action or croak "No action set on request";
-	$self->action->{pattern} =~ /\*\*$/ or croak "Action does not end with a wildcard";
+	#$self->action->{path} =~ /\*\*$/ or croak "Action does not end with a wildcard";
 	my $path_match= $self->action->{path_match} or croak "Action does not spectify path_match";
-	my $remainder= $self->captures->[-1] // '';
+	my $remainder= $self->action->{captures}[-1] // '';
 	$remainder =~ s,^/*,/,;
 	my $base= ($env->{SCRIPT_NAME} // '') . $path_match;
 	$base =~ s,/+$,,;
