@@ -949,10 +949,10 @@ needing a pair of objects everywhere.
 =item L<CGI::Application>
 
 Old and simple-ish framework with "controller object holds refs to everything"
-pattern that I like, but which is otherwise behind the times on programming
-and web trends.
+and "return value is response" pattern that I like, but which is otherwise
+behind the times on programming and web trends.
 
-=cut
+=back
 
 =cut
 
