@@ -219,42 +219,50 @@ added using C<< with "$ROLE" >>.
 =cut
 
 sub import {
-	my ($class, @args)= @_;
-	my $caller= caller;
-	my ($add_moo, @plug, @extend, @with);
-	while (@args) {
-		if ($args[0] eq '-parent') {
-			shift @args;
-			$add_moo= 1;
-		}
-		elsif ($args[0] eq '-plugins') {
-			shift @args;
-			while (@args && $args[0] !~ /^-/) {
-				my $name= shift @args;
-				push @plug, ($name =~ /^\+/? substr($name,1) : 'Web::ConServe::Plugin::'.$name);
-			}
-		}
-		elsif ($args[0] eq '-with') {
-			shift @args;
-			while (@args && $args[0] !~ /^-/) { push @with, shift @args; }
-		}
-		elsif ($args[0] eq '-extends') {
-			shift @args;
-			while (@args && $args[0] !~ /^-/) { push @extend, shift @args; }
-		}
-		else {
-			croak "Un-handled export requested from Web::ConServe: $args[0]";
-		}
-	}
-	eval 'package '.$caller.'; use Moo; extends "Web::ConServe"; 1' or croak $@
-		if $add_moo;
-	eval join(';', 'package '.$caller, (map "use $_ '-plug'", @plug), 1) or croak $@
-		if @plug;
-	eval 'package '.$caller.'; extends @extend; 1' or croak $@
-		if @extend;
-	eval 'package '.$caller.'; with @with; 1' or croak $@
-		if @with;
+	my $class= shift;
+	local $Carp::Internal{(__PACKAGE__)}= 1;
+	Web::ConServe::Exports->import_into(scalar(caller), @_);
 }
+package Web::ConServe::Exports {
+	use Exporter::Extensible -exporter_setup => 1;
+	export qw( -parent -plugins(*) -with(*) -extends(*) );
+	sub parent {
+		eval 'package '.shift->{into}.'; use Moo; extends "Web::ConServe"; 1'
+			or Carp::croak $@;
+	}
+	sub _args_til_next_opt {
+		my @list;
+		for (@_) {
+			last if $_ =~ /^-/;
+			push @list, $_;
+		}
+		@list;
+	}
+	sub plugins {
+		my $self= shift;
+		my @plug= &_args_til_next_opt;
+		for my $name (@plug) {
+			$name= $name =~ /^\+/? substr($name,1) : 'Web::ConServe::Plugin::'.$name;
+			Module::Runtime::require_module($name);
+			$name->import_into($self->{into}, '-plug');
+		}
+		return scalar @plug;
+	}
+	sub with {
+		my $self= shift;
+		my @list= &_args_til_next_opt;
+		eval 'package '.$self->{into}.'; with @list; 1' or Carp::croak($@)
+			if @list;
+		return scalar @list;
+	}
+	sub extends {
+		my $self= shift;
+		my @list= &_args_til_next_opt;
+		eval 'package '.$self->{into}.'; extends @list; 1' or Carp::croak($@)
+			if @list;
+		return scalar @list;
+	}
+};
 
 # Default allows subclasses to wrap it with modifiers
 sub BUILD {}
