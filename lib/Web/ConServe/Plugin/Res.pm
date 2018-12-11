@@ -1,11 +1,8 @@
 package Web::ConServe::Plugin::Res;
 
-use strict;
-use warnings;
-use Carp 'croak';
+use Web::ConServe::Plugin -extend;
 use Web::ConServe::QuickHttpStatus;
 use HTTP::Status;
-use Exporter;
 
 # ABSTRACT: Export lots of short-hand response notations
 
@@ -40,21 +37,10 @@ plugin:
 
 =cut
 
-sub import {
-	# If argument is '-plug', then substitute the default plugin behaviors
-	for (0..$#_) {
-		splice(@_, $_, 1, ':all') if $_[$_] eq '-plug';
-	}
-	goto \&Exporter::import;
+sub plug {
+	my $self= shift;
+	$self->exporter_also_import(':all');
 }
-
-our @EXPORT_OK= qw(
-	res_redirect res_redirect_other res_redirect_perm res_redirect_temp
-	res_badreq res_forbidden res_notfound res_unprocessable
-	res_error res_notimplemented res_unavailable res_timeout
-	res_html res_json
-);
-our %EXPORT_TAGS= ( all => \@EXPORT_OK );
 
 =head1 EXPORTS
 
@@ -69,11 +55,11 @@ aliases:
 
 =cut
 
-for (map HTTP::Status->$_, grep /^HTTP_/, @HTTP::Status::EXPORT_OK) {
+for (grep /^HTTP_/, @HTTP::Status::EXPORT_OK) {
 	no strict 'refs';
-	my $code= $_;
-	push @EXPORT_OK, "http$_";
-	*{"http$_"}= sub { Web::ConServe::QuickHttpStatus->new_shorthand($code, @_) };
+	my $code= HTTP::Status->$_;
+	*{"http$code"}= $EXPORT{"http$code"}=
+		sub { Web::ConServe::QuickHttpStatus->new_shorthand($code, @_) };
 }
 
 =item res_redirect
@@ -143,6 +129,12 @@ http504
 *res_unavailable=   *http503;
 *res_timeout=       *http504;
 
+export qw(
+	res_redirect res_redirect_other res_redirect_perm res_redirect_temp
+	res_badreq res_forbidden res_notfound res_unprocessable
+	res_error res_notimplemented res_unavailable res_timeout
+);
+
 =head2 res_html
 
   return res_html '<html><body><center>Test</center></body></html>';
@@ -175,5 +167,7 @@ sub res_json {
 	}
 	return Plack::Response->new(200, ['Content-Type' => 'application/json'], [$json]);
 }
+
+export qw( res_html res_json );
 
 1;
