@@ -542,11 +542,11 @@ sub dispatch_fail_response {
 
   my $plack_result= $app->view( $something );
 
-Convert an application-specific result into a Plack response arrayref.
-By default, this checks for objects which are not arrayrefs and have method
-C<to_app>, and then runs them as a plack app with a modified C<PATH_INFO>
-and C<SCRIPT_NAME> according to which acton got dispatched.  Note that this
-also handles L<Plack::Response> objects.
+Convert an application-specific result into a Plack response arrayref/coderef.
+By default, this checks for blessed objects which have method C<to_app>, and
+then runs them as a plack app with a modified C<PATH_INFO> and C<SCRIPT_NAME>
+according to which acton got dispatched.  Note that this also handles
+L<Plack::Response> objects.
 
 You may customize this however you like, and plugins are likely to wrap it
 with method modifiers as well.  Keep in mind though that the best performance
@@ -557,16 +557,18 @@ of "if" checks after the fact.
 
 sub view {
 	my ($self, $result)= @_;
-	if (ref($result) ne 'ARRAY' && ref($result)->can('to_app')) {
+	if (ref($result) eq 'ARRAY') {
+		if (@$result == 3 && $result->[0] >= 400 && @{$result->[2]} == 0) {
+			# If response is a plain HTTP status error, and has no content,
+			# add default content.
+			push @{$result->[2]}, status_message($result->[0]);
+		}
+	}
+	elsif (ref($result) && ref($result)->can('to_app')) {
 		# Save a step for Plack::Response
 		return $result->finalize if $result->can('finalize');
 		# Else execute another app
 		return $result->to_app->($self->req->env);
-	}
-	elsif (@$result == 3 && $result->[0] >= 400 && @{$result->[2]} == 0) {
-		# If response is a plain HTTP status error, and has no content,
-		# add default content.
-		push @{$result->[2]}, status_message($result->[0]);
 	}
 	return $result;
 }
