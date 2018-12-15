@@ -5,6 +5,7 @@ use AnyEvent;
 use AnyEvent::WebSocket::Server;
 require Carp;
 require Scalar::Util;
+require B::Hooks::EndOfScope;
 
 # ABSTRACT: Upgrade a plack connection to become a websocket
 
@@ -49,7 +50,10 @@ following attributes and methods:
 
 sub plug {
 	my $self= shift;
-	Moo::Role->apply_roles_to_package($self->{into}, 'Web::ConServe::Plugin::WebSocket::Role');
+	my $into= $self->{into};
+	B::Hooks::EndOfScope::on_scope_end(sub {
+		Moo::Role->apply_roles_to_package($into, 'Web::ConServe::Plugin::WebSocket::Role');
+	});
 }
 
 =head1 ATTRIBUTES
@@ -91,10 +95,10 @@ this will return a suitable Plack streaming coderef response.
 
 =head2 dispatch_websocket_message
 
-You must supply this method.  It may be empty if you don't need it.  It receives the message
-as its only parameter.  The C<< $self >> instance this is called on will be the same instance
-which originally called L</websocket_upgrade_connection>.  (and yes, this instance will get
-destroyed once the websocket closes or when the parent app_instance is destroyed.)
+You supply this method.  It receives the message as its only parameter.  The C<< $self >>
+instance this is called on will be the same instance which originally called
+L</websocket_upgrade_connection>.  (and yes, this instance will get destroyed once the
+websocket closes or when the parent app_instance is destroyed.)
 
 =cut
 
@@ -161,7 +165,8 @@ package Web::ConServe::Plugin::WebSocket::Role {
 		};
 	}
 	
-	requires 'dispatch_websocket_message';
+	# Placeholder
+	sub dispatch_websocket_message {}
 };
 
 1;

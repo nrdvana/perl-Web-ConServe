@@ -9,6 +9,7 @@ use Web::ConServe::PathMatch;
 use Const::Fast 'const';
 use Module::Runtime;
 use HTTP::Status 'status_message';
+use B::Hooks::EndOfScope;
 use namespace::clean;
 
 # ABSTRACT: Conrad's conservative web service framework
@@ -182,7 +183,7 @@ is equivalent to
   BEGIN { extends 'Web::ConServe'; }
   use Web::ConServe::Plugin::Foo '-plug';
   use Web::ConServe::Plugin::Bar '-plug';
-  BEGIN { with "XYZ"; }
+  end_of_scope { with "XYZ"; }
 
 Note that this allows plugins to change the class/role hierarchy as well as
 inject symbols into the current package namespace, such as 'sugar' methods.
@@ -251,8 +252,10 @@ package Web::ConServe::Exports {
 	sub with {
 		my $self= shift;
 		my @list= &_args_til_next_opt;
-		eval 'package '.$self->{into}.'; with @list; 1' or Carp::croak($@)
-			if @list;
+		my $into= $self->{into};
+		B::Hooks::EndOfScope::on_scope_end(sub {
+			Moo::Role->apply_roles_to_package($into, @list);
+		}) if @list;
 		return scalar @list;
 	}
 	sub extends {
