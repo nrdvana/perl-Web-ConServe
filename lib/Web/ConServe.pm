@@ -473,11 +473,12 @@ final C<**> pattern.  This assists with setting up nested controllers.
 
 =item captures
 
-The arrayref of captures strings for the wildcards in the pattern.
+The arrayref of strings captured from the URI.
+(one for each wildcard or place-holder in the pattern)
 
 =item capture_by_name
 
-If any captures were named, this is a hashref of C<< name => $value >>.
+If any captures were named, this is a hashref of C<< $name => $value >>.
 
 =item mismatch
 
@@ -545,7 +546,7 @@ sub dispatch_fail_response {
 Convert an application-specific result into a Plack response arrayref/coderef.
 By default, this checks for blessed objects which have method C<to_app>, and
 then runs them as a plack app with a modified C<PATH_INFO> and C<SCRIPT_NAME>
-according to which acton got dispatched.  Note that this also handles
+according to which action got dispatched.  Note that this also handles
 L<Plack::Response> objects.
 
 You may customize this however you like, and plugins are likely to wrap it
@@ -632,7 +633,7 @@ sub conserve_register_action {
 
   my $rule_data= $self->conserve_parse_action( $action_spec, \$err_msg )
                  or croak $err_msg;
-  # input:   /foo/:bar/* GET,PUT local_client
+  # input:   "/foo/:bar/* GET,PUT local_client"
   # output:  {
   #            path => '/foo/*/*',
   #            methods => { GET => 1, PUT => 1 },
@@ -941,7 +942,7 @@ curve.  Also heavy on dependencies.
 
 Full-featured web service framework with emphasis on event-driven style,
 and having a complete copy of CPAN within it's own namespace.  Based on its
-own object system.  C<Not> Plack-compatible.
+own object system.  B<Not> Plack-compatible.
 
 The complete copy of CPAN is very well written, but requires you to learn a
 new API for everything you already knew, and which you can't use for other
@@ -954,13 +955,13 @@ further dispatch routing paths.
 
 Downsides: The closures-within-closures-within-closures don't lead to clean
 code.  If you avoid closures, then it suffers from the Catalyst problem of
-needing a pair of objects everywhere.
+needing a pair of objects passed around everywhere.
 
 =item L<CGI::Application>
 
-Old and simple-ish framework with "controller object holds refs to everything"
-and "return value is response" pattern that I like, but which is otherwise
-behind the times on programming and web trends.
+Old and simple-ish framework with "controller-object-holds-refs-to-everything"
+and "return-value-is-response" pattern that I like, but which has all the
+wrong defaults for modern web programming.
 
 =back
 
