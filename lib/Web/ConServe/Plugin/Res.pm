@@ -148,7 +148,21 @@ with header C<content-type: text/html; charset=UTF-8>.
   return res_json '["foo","bar"]';   # raw json
 
 Return the argument as a plack response, converted to json if it wasn't
-already, and adds header C<content-type: application/json>.
+already, and adds header C<content-type: application/json; charset=UTF-8>.
+
+=head2 res_jsonp
+
+  return res_jsonp($self->req->param('callback'), { foo => 1 });
+
+Same as res_json, but wraps the second argument in a function name of the first argument.
+Usually, the function name will be passed by the client as a parameter.
+Returns C<content-type: text/javascript>, to match expectation of script tags.
+
+=head2 res_plain
+
+  return res_plain("Just some text");
+
+Wraps the text with a 200 code and C<content-type: text/plain; charset=UTF-8>.
 
 =cut
 
@@ -159,15 +173,33 @@ sub res_html {
 
 # Return something as JSON
 sub res_json {
+	@_ == 1 or croak "Wrong number of arguments to res_json";
 	my $json= shift;
 	if (!ref $json) {
 		$json =~ /^[\[\{\"]/ or croak "res_json argument is a scalar that does not appear to be json";
 	} else {
 		$json= JSON::MaybeXS->new->ascii->canonical->convert_blessed->encode($json);
 	}
-	return Plack::Response->new(200, ['Content-Type' => 'application/json'], [$json]);
+	return Plack::Response->new(200, ['Content-Type' => 'application/json; charset=UTF-8'], [$json]);
 }
 
-export qw( res_html res_json );
+sub res_jsonp {
+	@_ == 2 or croak "Wrong number of arguments to res_jsonp";
+	my ($fn_name, $json)= @_;
+	$fn_name =~ /^\w+$/
+		or croak "First argument to res_jsonp should be the jsonp function name";
+	if (!ref $json) {
+		$json =~ /^[\[\{\"]/ or croak "res_json argument is a scalar that does not appear to be json";
+	} else {
+		$json= JSON::MaybeXS->new->ascii->canonical->convert_blessed->encode($json);
+	}
+	return Plack::Response->new(200, ['Content-Type' => 'text/javascript; charset=UTF-8'], [$fn_name.'('.$json.')']);
+}
+
+sub res_plain {
+	return Plack::Response->new(200, ['Content-Type' => 'text/plain; charset=UTF-8'], [@_]);
+}
+
+export qw( res_html res_json res_jsonp res_plain );
 
 1;
