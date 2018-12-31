@@ -124,9 +124,10 @@ See L</actions> and L</search_actions>.
 
 =item Main Object Creation
 
-The class you declared gets created at startup via the normal Moo C<new>
-constructor.  Customize the initialization however you normally would with
-L<Moo>.
+The class you declared gets created via the normal Moo C<new> constructor.
+Customize the initialization however you normally would with L<Moo>.
+One or more application instance might be created in construction of a Plack
+app hierarchy.
 
 =item Plack App Creation
 
@@ -175,7 +176,7 @@ after the last chunk of data has been delivered to the client.
 
 =head1 IMPORTS
 
-  use Web::ConServe qw/ -parent -plugins Foo Bar -with XYZ /;
+  use Web::ConServe qw/ -extend -plugins Foo Bar -with XYZ /;
 
 is equivalent to
 
@@ -183,19 +184,33 @@ is equivalent to
   BEGIN { extends 'Web::ConServe'; }
   use Web::ConServe::Plugin::Foo '-plug';
   use Web::ConServe::Plugin::Bar '-plug';
-  end_of_scope { with "XYZ"; }
+  ...
+  # end_of_scope
+  with "XYZ";
 
 Note that this allows plugins to change the class/role hierarchy as well as
 inject symbols into the current package namespace, such as 'sugar' methods.
-The roles or parent classes you add here happen at BEGIN-time, saving you
-some typing and cleaning up your code.
+The parent classes you add here happen at BEGIN-time, and the roles you add
+happen at the end of the compilation phase, saving you some boilerplate and
+cleaning up your code.
 
 =over
 
-=item -parent
+=item -extend
 
-Declares that Moo should be invoked, and Web::ConServe should be installed
-as the parent class.
+Sets the current package to extend from Web::ConServe, and initialize Moo
+for the current package.  You must also call C<<extend_end;>> at the end of
+your package., and also initializes
+some things for the plugin system.  Always specify this flag when creating a
+new Web::ConServe application (unless you have a good reason not to).  You
+must also then specify C<<extend_end;>> at the end of your package (or any
+time earlier).
+
+This gives you the effect of C<< use Moo; BEGIN { extends 'Web::ConServe'; } >>
+including enabling strict and warnings.
+
+Note that omitting this flag allows you to use or export things from
+Web::ConServe without defining a new application.
 
 =item -plugins
 
@@ -213,7 +228,8 @@ be added using C<< extends "$PKG" >>.
 =item -with
 
 Declares that all following arguments (until next option) are role names to be
-added using C<< with "$ROLE" >>.
+added using C<< with "$ROLE" >>.  Roles are added at the *end* of the code in
+the module, to allow role features like C<requires> to work better.
 
 =back
 
@@ -226,19 +242,60 @@ sub import {
 }
 package Web::ConServe::Exports {
 	use Exporter::Extensible -exporter_setup => 1;
-	export qw( -parent -plugins(*) -with(*) -extends(*) );
-	sub parent {
-		eval 'package '.shift->{into}.'; use Moo; extends "Web::ConServe"; 1'
-			or Carp::croak $@;
+	export qw( -extend -extend_begin -extend_end extend_end -plugins(*) -with(*) -extends(*) add_base_class apply_role_at_end );
+
+	sub pending_roles { $_[0]{pending_roles} //= [] }
+	sub has_pending_roles { defined $_[0]{pending_roles} }
+
+	sub pending_methods { $_[0]{pending_methods} //= [] }
+	sub has_pending_methods { defined $_[0]{pending_methods} }
+
+	our %extend_in_progress;
+	sub extend {
+		my $self= shift;
+		$self->extend_begin;
+		B::Hooks::EndOfScope::on_scope_end(sub { $self->extend_end });
 	}
+	sub extend_begin {
+		my $self= shift;
+		my $pkg= $self->{into};
+		$pkg && !ref $pkg
+			or Carp::croak("-extend can only be applied to packages");
+		eval 'package '.$pkg.'; use Moo; extends "Web::ConServe"; 1'
+			or Carp::croak($@);
+		$extend_in_progress{$pkg}= $self;
+		$self->exporter_also_import('extend_end');
+	}
+	sub extend_end {
+		my $self= shift;
+		unless (ref $self) {
+			$self //= caller;
+			$self= $extend_in_progress{$self} or return;
+		}
+		# Apply roles that were waiting for the end of compilation
+		if ($self->has_pending_roles) {
+			my $with= $self->{into}->can('with');
+			$with? $with->(@{$self->pending_roles})
+			: Moo::Role->apply_roles_to_package($self->{into}, @{$self->pending_roles});
+			delete $self->{pending_roles};
+		}
+		# Run any code that needs to be run
+		if ($self->has_pending_methods) {
+			$self->$_ for @{ $self->pending_methods };
+			delete $self->{pending_methods};
+		}
+		delete $extend_in_progress{$self->{into}};
+	}
+	
 	sub _args_til_next_opt {
 		my @list;
 		for (@_) {
-			last if $_ =~ /^-/;
+			last if $_ =~ /^[^+A-Z]/;
 			push @list, $_;
 		}
 		@list;
 	}
+
 	sub plugins {
 		my $self= shift;
 		my @plug= &_args_til_next_opt;
@@ -249,21 +306,44 @@ package Web::ConServe::Exports {
 		}
 		return scalar @plug;
 	}
+
 	sub with {
 		my $self= shift;
 		my @list= &_args_til_next_opt;
-		my $into= $self->{into};
-		B::Hooks::EndOfScope::on_scope_end(sub {
-			Moo::Role->apply_roles_to_package($into, @list);
-		}) if @list;
+		apply_role_at_end($self->{into}, @list);
 		return scalar @list;
 	}
+
 	sub extends {
 		my $self= shift;
 		my @list= &_args_til_next_opt;
 		eval 'package '.$self->{into}.'; extends @list; 1' or Carp::croak($@)
 			if @list;
 		return scalar @list;
+	}
+
+	# Exportable function for use as back-end equivalent of Moo's 'extends "Foo";'
+	sub add_base_class {
+		my $pkg= shift;
+		no strict 'refs';
+		my @current= @{ $pkg . '::ISA' };
+		$pkg->isa($_) or push @current, $_
+			for @_;
+		my $ex= $pkg->can('extends')
+			or Carp::croak("Package $pkg does not currently define function 'extends'");
+		$ex->(@current);
+	}
+
+	# Exportable function that acts like Moo's 'with "Foo";', but applies after the BEGIN blocks
+	sub apply_role_at_end {
+		my ($pkg, @roles)= @_;
+		if ($extend_in_progress{$pkg}) {
+			push @{ $extend_in_progress{$pkg}{pending_roles} }, @roles;
+		} else {
+			my $apply= $pkg->can('with');
+			$apply? $apply->(@roles)
+			: Moo::Role->apply_roles_to_package($pkg, @roles);
+		}
 	}
 };
 
@@ -924,8 +1004,8 @@ large-scale app with.
 =item L<Catalyst>
 
 Full-featured web service framework with emphasis on MVC structure and methods
-that get automatically invoked in sequence. Moose-based.  Supports and now
-heavily based on Plack.
+that get automatically invoked in sequence. Moose-based.  Supports (and now
+heavily based on) Plack.
 
 Downsides: lots of dependencies, and makes OO programming awkward with separate
 controller and context variables that need passed around everywhere.

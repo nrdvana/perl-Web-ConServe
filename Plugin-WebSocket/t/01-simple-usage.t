@@ -6,7 +6,7 @@ use Test::More;
 use_ok('Web::ConServe::Plugin::WebSocket');
 
 package Example1;
-use Web::ConServe -parent, -plugins => "WebSocket";
+use Web::ConServe -extend, -plugins => "WebSocket";
 sub dispatch_websocket_message { return 2; }
 
 package main;

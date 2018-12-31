@@ -4,7 +4,6 @@ use Web::ConServe::Plugin -extend;
 use AnyEvent;
 use AnyEvent::WebSocket::Server;
 require Web::ConServe::Plugin::WebSocket::Role;
-require B::Hooks::EndOfScope;
 
 # ABSTRACT: Upgrade a plack connection to become a websocket
 
@@ -49,10 +48,7 @@ See that package for details.
 
 sub plug {
 	my $self= shift;
-	my $into= $self->{into};
-	B::Hooks::EndOfScope::on_scope_end(sub {
-		Moo::Role->apply_roles_to_package($into, 'Web::ConServe::Plugin::WebSocket::Role');
-	});
+	$self->target_queue_role('Web::ConServe::Plugin::WebSocket::Role');
 }
 
 1;

@@ -9,7 +9,7 @@ use Plack::Test;
 use HTTP::Request::Common qw( GET POST );
 
 package ArrayApp {
-	use Web::ConServe -parent, -plugins => 'Res';
+	use Web::ConServe -extend => -plugins => 'Res';
 	use Try::Tiny;
 
 	has things => ( is => 'rw', required => 1 );

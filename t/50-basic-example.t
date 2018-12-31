@@ -7,7 +7,7 @@ use lib "$FindBin::Bin/lib";
 use ConServeTestUtil ':all';
 
 package Example1 {
-	use Web::ConServe qw/ -parent /;
+	use Web::ConServe qw/ -extend /;
 	sub test1 : Serve('GET /foo') {
 		shift; return [200,[],[ test1 => @_ ]]
 	}
@@ -34,7 +34,7 @@ sub test_Example1 {
 }
 
 package Example2 {
-	use Web::ConServe qw/ -parent /;
+	use Web::ConServe qw/ -extend /;
 	sub foo : Serve(GET /foo/:id) {
 		shift; return [200,[],[ foo => @_ ]]
 	}
@@ -76,7 +76,7 @@ sub test_Example2 {
 }
 
 package CapturesAreParameters {
-	use Web::ConServe -parent;
+	use Web::ConServe -extend;
 	sub foo : Serve('/object/:obj_id') {
 		my $self= shift;
 		return [200,[],[ 'foo', [@_], $self->params ]];
