@@ -5,7 +5,7 @@ use AnyEvent;
 use AnyEvent::WebSocket::Server;
 require Web::ConServe::Plugin::WebSocket::Role;
 
-# ABSTRACT: Upgrade a plack connection to become a websocket
+# ABSTRACT: Upgrade a psgi connection to become a websocket
 
 =head1 SYNOPSIS
 

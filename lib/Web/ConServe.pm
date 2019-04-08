@@ -25,11 +25,13 @@ use namespace::clean;
     my $self= shift;
     return res_json($self->things);
   }
+  
   sub create_thing :Serve( POST /thing/ ) {
     my $self= shift;
     push @{ $self->things }, { name => $self->param('name') };
     return res_redirect('/thing/'.$#{$self->things});
   }
+  
   sub get_thing :Serve( GET /thing/:id ) {
     my ($self, $id)= @_;
     $id >= 0 && $id < @{$self->things}
@@ -42,8 +44,8 @@ use namespace::clean;
 
 =head1 DESCRIPTION
 
-This little framework is the result of many observations I've made over the
-years of using of other web frameworks.  In a language that advertises There
+This little framework is the result of observations I've made over several
+years of using other web frameworks.  In a language that advertises There
 Is More Than One Way To Do It, the main web frameworks tend to make an awful
 lot of decisions for you, including a lot of small "bikeshed" details, and
 end up with a large learning curve.
@@ -61,29 +63,28 @@ then the learning curve should be pretty small.
 =head1 NOTABLE FEATURES
 
   package MyWebapp;
-  use Web::ConServe -parent,      # Automatically set up Moo and base class
+  use Web::ConServe -extend,      # Automatically set up Moo and base class
     -plugins => qw/ Res /;        # Supports a plugin system
   with 'My::Moo::Role';           # Fully Moo compatible
   
   # Actions are declared with method attributes like Catalyst,
   # but using a path syntax like Dancer or Web::Simple
   # but the application object is a lot more like CGI::Application.
-  # Request and Response are Plack-style.
-  # You can return Plack arrayref notation, or use sugar methods
-  # for more readable code.
+  # Request and Response are Plack-style.  You can return raw Plack
+  # responses, or use sugar methods for more readable code.
   # There is a minimal but extensible content negotiation system.
   
   sub index : Serve( / ) {
     my $self= shift;
     my $x= $self->param('x')
-      or return res_unprocessable('param x is required');
+      // return res_unprocessable('param x is required');
     return res_html("Hello World");
   }
   
   # You get Moo attributes, and can lazy-build.
   # One object is created for the app, and then cloned for each
   # request, preserving any lazy-built attributes from the first
-  # instance, but resetting any built during a request.
+  # instance, but resetting any attributes built during a request.
   
   has user_object => ( is => 'lazy' );
   sub _build_user_object {
@@ -122,11 +123,11 @@ is created, the actions get "compiled" into a search function.  Parent classes
 and plugins can also add actions.  You can override many pieces of this process.
 See L</actions> and L</search_actions>.
 
-=item Main Object Creation
+=item Application Instance Creation
 
 The class you declared gets created via the normal Moo C<new> constructor.
 Customize the initialization however you normally would with L<Moo>.
-One or more application instance might be created in construction of a Plack
+One or more application instances might be created as part of a Plack app
 app hierarchy.
 
 =item Plack App Creation
@@ -138,8 +139,8 @@ do so by overriding this method.
 =item Request Binding
 
 When a new request comes in, the plack app calls L</accept_request> which
-clones the main object and sets the L</request> attribute.  You can override
-that method, or simply set a custom L</request_class>.
+L</clone>s the main object and sets the L</request> attribute.  You can
+override that method, or simply set a custom L</request_class>.
 
 =item Request Dispatch
 
@@ -147,9 +148,9 @@ Next the plack app calls L</dispatch>.  This looks for the best matching
 action for the request, then if found, calls that method.  The return value
 from the method becomes the response, after pos-processing (described next).
 
-If there was not a matching rule, then L</dispatch> sets the response code
+If there was not a matching rule, then C<dispatch> sets the response code
 as appropriate: 404 for no path match, 405 for no method match, and 422 for
-a match that didn't meet custom user conditions.
+a match that didn't meet custom conditions.
 
 If the action method throws an exception, the default is to let it bubble up
 the Plack chain so that you can use Plack middleware to deal with it. If you
@@ -166,11 +167,13 @@ you came up with for the return values of your actions.
 
 =item Cleanup
 
-You should consider the end of L</view> to be the last point when you can take
-any action.  If that isn't enough, L<PSGI> servers might implement the
-L<psgix.cleanup|PSGI::Extensions/SPECIFICATION> system for you to use.
-Failing that, you could return a PSGI streaming coderef which runs some code
-after the last chunk of data has been delivered to the client.
+The end of L</view> is normally the last opportunity you have to run code
+related to the request; the per-request instance of the application gets
+garbage collected before returning to the Plack stack.  If that isn't enough,
+L<PSGI> servers might implement the L<psgix.cleanup|PSGI::Extensions/SPECIFICATION>
+system for you to use.  Failing that, you could return a PSGI streaming coderef
+which runs some code after the last chunk of data has been delivered to the
+client.
 
 =back
 
@@ -189,7 +192,8 @@ is equivalent to
   with "XYZ";
 
 Note that this allows plugins to change the class/role hierarchy as well as
-inject symbols into the current package namespace, such as 'sugar' methods.
+inject symbols into the current package namespace, such as "sugar" methods
+or even a domain-specific language.
 The parent classes you add here happen at BEGIN-time, and the roles you add
 happen at the end of the compilation phase, saving you some boilerplate and
 cleaning up your code.
@@ -198,19 +202,31 @@ cleaning up your code.
 
 =item -extend
 
-Sets the current package to extend from Web::ConServe, and initialize Moo
-for the current package.  You must also call C<<extend_end;>> at the end of
-your package., and also initializes
-some things for the plugin system.  Always specify this flag when creating a
-new Web::ConServe application (unless you have a good reason not to).  You
-must also then specify C<<extend_end;>> at the end of your package (or any
-time earlier).
-
-This gives you the effect of C<< use Moo; BEGIN { extends 'Web::ConServe'; } >>
+This option imports Moo into the current package and sets C<Web::ConServe> as
+the parent class.  i.e. C<< use Moo; BEGIN { extends 'Web::ConServe'; } >>
 including enabling strict and warnings.
+
+It also makes some magic happen so that C<extend_end;> gets called implicitly
+at the end of the current scope.  (see below)
 
 Note that omitting this flag allows you to use or export things from
 Web::ConServe without defining a new application.
+
+=item -extend_begin
+
+As an alternative to C<-extend>, you can request C<-extend_begin> and then
+explicitly call C<<extend_end;>> at a point of your choosing.  Nobody probably
+needs this, but it reduces "spooky action at a distance".  This option implies
+an export of symbol C<extend_end>.
+
+=item extend_end
+
+  extend_end();
+
+C<extend_end> should be called at the end of declaring an application.  It can
+be used by plugins to finalize the declaration of the app, so calling it is
+necessary for correct operation.  It gets called automatically at end of scope
+if you requested C<-extend>.
 
 =item -plugins
 
@@ -228,8 +244,25 @@ be added using C<< extends "$PKG" >>.
 =item -with
 
 Declares that all following arguments (until next option) are role names to be
-added using C<< with "$ROLE" >>.  Roles are added at the *end* of the code in
-the module, to allow role features like C<requires> to work better.
+added using C<< with "$ROLE" >> at the *end* of the current scope (via
+C<extend_end>, described above).  This allows role features like C<requires>
+to work better, since the check will happen after all your methods are defined.
+
+=item add_base_class
+
+  add_base_class( $package, @extra_parents )
+
+Moo overwrites the list of base classes when you call C<extends>.  This method
+preserves the existing C<@ISA> list while adding more, but still via Moo's
+C<extends> method for correct operation.
+
+=item apply_role_at_end
+
+  apply_role_at_end( $package, @roles )
+
+This applies roles to a class using C<< Moo::Role->apply_roles_to_package >>.
+If the C<$package> has a C<-extend_begin> in progress, the role application
+is delayed until C<extend_end> happens in that package.
 
 =back
 
@@ -409,14 +442,17 @@ was cloned from, and also have L</request> set.
 
 =head2 request_class
 
-The class to use for incoming requests.  The class must take a Plack C<$env> as
-a constructor parameter.  Setting this to a custom class allows you to use lazy
-attributes on the request object rather than overriding L</accept_request> and
-doing all the processing up-front.
+The class to use for incoming requests.  The default is L<Web::ConServe::Request>,
+which is a subclass of L<Plack::Request> with some extra fields.
+The class must take a Plack C<$env> as a constructor parameter.
+
+Setting this to a custom class allows you to use lazy attributes on the request
+object rather than overriding L</accept_request> and doing all the processing
+up-front.
 
 =head2 request
 
-  $self->req->params->get('x');  # alias 'req' is preferred
+  $self->req->...  # alias 'req' is preferred
 
 The request object.  The C<request> (and C<req>) accessor is read-only,
 because the request should never change from what was delivered to the
@@ -439,7 +475,9 @@ context and always returns a single value even for multi-valued parameters.
 
 =head2 params
 
-  my @x= $self->params->get_all('x');
+  my @x=             $self->params->get_all('x');
+  my $like_catalyst= $self->params->mixed;
+  my @kv_pairs=      $self->params->flatten;
 
 Shortcut for C<< $self->req->parameters >>, which is an instance of
 L<Hash::MultiValue>.
@@ -505,7 +543,7 @@ Like C<new>, but inherit all existing attributes of the current instance.
 This creates a B<shallow clone>.  Override this if you need to avoid sharing
 certain resources between instances.  You might also want to deep-clone
 critical attributes to make sure they don't get altered during a request,
-or better (on newer Perls) mark them readonly with L<Const::Fast>.
+or better, mark them readonly with L<Const::Fast>.
 
 =cut
 
@@ -579,7 +617,7 @@ return the correct HTTP status code.
 See L<Web::ConServe::PathMatch> for details on which matches take priority,
 and notes on debugging.
 
-=head2 dispatch_fail_response
+=head2 dispatch_failure_response
 
 This analyzes C<< ->req->action_rejects >> to come up with an appropriate HTTP
 status code, returned as a plack response arrayref.  It is called internally by
@@ -602,10 +640,10 @@ sub dispatch {
 	
 	return $action
 		? $action->{handler}->($self, @{$action->{captures}})
-		: $self->dispatch_fail_response;
+		: $self->dispatch_failure_response;
 }
 
-sub dispatch_fail_response {
+sub dispatch_failure_response {
 	my $self= shift;
 	my @rejects= @{ $self->req->action_rejects };
 	return [404, [], []]
@@ -965,7 +1003,7 @@ result of L</find_actions>.  If the action does not match, one of the returned
 keys should be C<mismatch>, and the value should indicate why.  The value
 C<'method'> indicates an HTTP 405, the value C<'permission'> indicates HTTP
 403, and any other value indicates HTTP 422 unless you also customize
-L</dispatch_fail_response>.
+L</dispatch_failure_response>.
 
 =item methods
 
